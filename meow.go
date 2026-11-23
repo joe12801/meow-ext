@@ -110,25 +110,33 @@ func (c *MeowClient) Search(ctx context.Context, query string, limit int, source
 		return c.searchOnce(ctx, query, limit, src)
 	}
 
-	// 每个音源取多少条：总上限摊到各源，至少 3 条，避免 8 个源各拉 20 条。
+	// 每个音源取多少条：总上限摊到各源，保证每个源都有名额。
+	//
+	// 这里必须按"均分"而不是"每源取 limit"：早先每源取 min(limit, n*3) 条
+	// 再按 sources 顺序摊平，结果前两个音源就把 30 条名额占满，后面 6 个
+	// 音源即使搜到结果也全部被截掉。用户看到的是"只有 B 站和 5sing"，
+	// 而日志里却写着"8/9 个音源有结果"——正是这个不对称造成的误导。
 	perSource := limit
 	if perSource <= 0 {
 		perSource = 10
 	}
-	if n := len(sources); perSource > n*3 {
-		perSource = n * 3
+	if n := len(sources); perSource > n {
+		perSource /= n
 	}
-	if perSource < 3 {
-		perSource = 3
+	if perSource < 4 {
+		perSource = 4 // 少于 4 条的源几乎无法覆盖不同版本
+	}
+	if perSource > 20 {
+		perSource = 20
 	}
 
 	var (
-		wg     sync.WaitGroup
-		mu     sync.Mutex
+		wg       sync.WaitGroup
+		mu       sync.Mutex
 		firstErr error
-		okN    int
-		parts  = make([][]MeowTrack, len(sources))
-		sem    = make(chan struct{}, 4) // 上游是本机服务，4 并发够了
+		okN      int
+		parts    = make([][]MeowTrack, len(sources))
+		sem      = make(chan struct{}, 4) // 上游是本机服务，4 并发够了
 	)
 	for i, src := range sources {
 		wg.Add(1)
@@ -156,23 +164,45 @@ func (c *MeowClient) Search(ctx context.Context, query string, limit int, source
 		return nil, firstErr
 	}
 
+	// 轮转摊平：第 1 轮每个音源各取 1 条，第 2 轮再各取 1 条……
+	// 这样即使总名额被 limit 截断，也是各源等比缩小，而不是"前面的源吃满、
+	// 后面的源一条不给"。用户搜一次就能看到所有勾选音源的结果。
 	seen := make(map[string]struct{}, 64)
 	out := make([]MeowTrack, 0, 64)
-	for _, got := range parts { // 按 sources 顺序摊平，结果稳定
-		for _, t := range got {
+	used := make([]int, len(parts))
+	truncated := false
+	for round := 0; !truncated; round++ {
+		progressed := false
+		for i, got := range parts {
+			if round >= len(got) {
+				continue
+			}
+			progressed = true
+			t := got[round]
 			key := t.Source + "\x1f" + t.Title + "\x1f" + t.Artist
 			if _, dup := seen[key]; dup {
 				continue
 			}
+			if limit > 0 && len(out) >= limit {
+				truncated = true
+				break
+			}
 			seen[key] = struct{}{}
 			out = append(out, t)
+			used[i]++
+		}
+		if !progressed {
+			break
 		}
 	}
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+	// 每个源实际贡献了几条——这行是多源排障最有用的信息：
+	// 能一眼看出"某个源 0 条"是源本身没结果，"合计被截断"是名额分配问题。
+	dist := make([]string, 0, len(sources))
+	for i, src := range sources {
+		dist = append(dist, fmt.Sprintf("%s=%d", src, used[i]))
 	}
-	log.Printf("[search] %q 多源合并：%d/%d 个音源有结果，合计 %d 条",
-		query, okN, len(sources), len(out))
+	log.Printf("[search] %q 多源合并：%d/%d 个音源有结果，合计 %d 条（%s）",
+		query, okN, len(sources), len(out), strings.Join(dist, " "))
 	return out, nil
 }
 
