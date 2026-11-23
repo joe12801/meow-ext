@@ -39,6 +39,9 @@ type Server struct {
 	searchCache *searchCache
 	// meowCooldown 在 Meow 报 429/403 后短期跳过它，不再为已知结论反复往返。
 	meowCooldown *meowCooldown
+	// quota 是给 healthz / 管理页看的额度快照，带 30 秒软化缓存。
+	// 零值可用：第一次查询时自然填充。
+	quota meowQuotaCache
 
 	startedAt time.Time
 }
@@ -197,6 +200,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 额度只在 Meow 可用时才有意义。登录身份（设备 Token / 用户 Token）
+	// 有效时 Meow 只回 logged_in:true，剩余数缺省为 0——展示时要按
+	// logged_in 区分，别把 0 读成"用完了"。
+	var quotaView any
+	if cfg.OnlineEnabled && meowErrText == "" {
+		ctx, cancel := timeoutCtx(r, 2*time.Second)
+		q, has, qerr := s.quota.get(ctx, s.meowClient())
+		cancel()
+		if has {
+			quotaView = map[string]any{
+				"limit":     q.Limit,
+				"used":      q.Used,
+				"remaining": q.Remaining,
+				"logged_in": q.LoggedIn,
+				"error":     errText(qerr),
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       upErr == nil,
 		"version":  Version,
@@ -213,6 +235,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// 额度用尽后扩展会主动冷一段时间，这里把剩余时间报出来，
 			// 免得排障时看到"搜索没有 Meow 结果"却以为线路断了。
 			"cooldown_s": int(s.meowCooldown.remaining().Seconds()),
+			"quota":      quotaView,
 		},
 		"youtube": map[string]any{
 			"configured": ytConfigured,

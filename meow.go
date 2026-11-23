@@ -82,10 +82,56 @@ func (c *MeowClient) newRequest(ctx context.Context, method, path string, query 
 		return nil, err
 	}
 	if c.token != "" {
+		// Meow 认三种凭据，顺序是 设备 Token → Bearer → 会话 Cookie
+		// （见它 resolveUserID 的实现）。扩展手上只有一串 token，无法预知
+		// 用户填的是哪一种，所以两种头都发：填的是 ESP32 那种设备 Token
+		// 就走 X-Device-Token 认掉，填的是 /api/auth/login 换来的用户
+		// Token 就让第一个头验不过、自动落到 Bearer。少发一个头就会出现
+		// "token 明明配了、额度还是 429"的死角。
+		req.Header.Set("X-Device-Token", c.token)
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("Accept", "application/json")
 	return req, nil
+}
+
+// MeowQuota 是 Meow 的额度视图。
+//
+// /api/guest/quota 对游客返回 {enabled,limit,logged_in:false,remaining,used}，
+// 而身份认得出来时只返回 {enabled,limit,logged_in:true}——登录用户本来就不受
+// 游客限额约束，所以剩下几个字段缺省为 0，展示时要按 LoggedIn 区分，
+// 不能把 remaining=0 读成"额度用完了"。
+type MeowQuota struct {
+	Enabled   bool `json:"enabled"`
+	Limit     int  `json:"limit"`
+	LoggedIn  bool `json:"logged_in"`
+	Remaining int  `json:"remaining"`
+	Used      int  `json:"used"`
+}
+
+// Quota 查一次额度。失败只返回错误，由调用方决定是忽略还是展示。
+func (c *MeowClient) Quota(ctx context.Context) (MeowQuota, error) {
+	var q MeowQuota
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/guest/quota", nil)
+	if err != nil {
+		return q, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return q, &MeowError{Msg: "查询 Meow 额度失败：" + err.Error()}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil {
+		return q, &MeowError{Status: resp.StatusCode, Msg: "读取额度响应失败：" + err.Error()}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return q, &MeowError{Status: resp.StatusCode, Msg: snippet(body)}
+	}
+	if err := json.Unmarshal(body, &q); err != nil {
+		return q, &MeowError{Status: resp.StatusCode, Msg: "额度响应不是预期的 JSON"}
+	}
+	return q, nil
 }
 
 // Search 调 Meow 的聚合搜索。

@@ -301,3 +301,78 @@ func TestMeowTokenIsSent(t *testing.T) {
 		t.Fatalf("令牌未带上：%q", gotAuth)
 	}
 }
+
+// Meow 的设备 Token 走 X-Device-Token，用户 Token 走 Authorization。
+// 扩展手上只有一串 token、无从判断类型，必须两个头都发——少发一个就会出现
+// "token 配了、额度照样 429"的死角。
+func TestMeowTokenIsSentAsBothDeviceAndBearer(t *testing.T) {
+	var gotDev, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDev = r.Header.Get("X-Device-Token")
+		gotAuth = r.Header.Get("Authorization")
+		io.WriteString(w, "[]")
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.MeowURL = srv.URL
+	cfg.MeowToken = "03503c053b659805a77a16f437753ba8f04d90403f060b6676a52e14c18042b7"
+	NewMeowClient(cfg).Search(context.Background(), "x", 5, nil)
+	if gotDev != cfg.MeowToken {
+		t.Fatalf("X-Device-Token 未带上：%q", gotDev)
+	}
+	if gotAuth != "Bearer "+cfg.MeowToken {
+		t.Fatalf("Authorization 未带上：%q", gotAuth)
+	}
+}
+
+// 没配 token 时两个头都不该出现：空串被当成凭据发给上游，
+// Meow 会去查这个空 token，白多一次失败路径。
+func TestMeowNoTokenSendsNoAuthHeaders(t *testing.T) {
+	var gotDev, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDev = r.Header.Get("X-Device-Token")
+		gotAuth = r.Header.Get("Authorization")
+		io.WriteString(w, "[]")
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.MeowURL = srv.URL
+	NewMeowClient(cfg).Search(context.Background(), "x", 5, nil)
+	if gotDev != "" || gotAuth != "" {
+		t.Fatalf("未配 token 却发了凭据：dev=%q auth=%q", gotDev, gotAuth)
+	}
+}
+
+// 游客额度与登录额度是两种形状：登录后 Meow 不再回 used/remaining，
+// 只给 logged_in:true。解析时不能把缺省的 0 当成"额度用尽"。
+func TestMeowQuotaParsesGuestAndLoggedIn(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       MeowQuota
+	}{
+		{"游客", `{"enabled":true,"limit":20,"logged_in":false,"remaining":3,"used":17}`,
+			MeowQuota{Enabled: true, Limit: 20, Remaining: 3, Used: 17}},
+		{"已登录", `{"enabled":true,"limit":20,"logged_in":true}`,
+			MeowQuota{Enabled: true, Limit: 20, LoggedIn: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/guest/quota" {
+					t.Errorf("打错端点：%s", r.URL.Path)
+				}
+				io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			cfg := DefaultConfig()
+			cfg.MeowURL = srv.URL
+			got, err := NewMeowClient(cfg).Quota(context.Background())
+			if err != nil {
+				t.Fatalf("查询额度失败：%v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("额度解析不符：got %+v want %+v", got, tc.want)
+			}
+		})
+	}
+}

@@ -138,7 +138,7 @@
       <input type="text" id="meowUrl" placeholder="http://192.168.2.220:2233" spellcheck="false">
     </label>
     <label class="field">
-      <span>访问令牌<span class="hint" id="tokenHint">上游未启用鉴权时留空</span></span>
+      <span>访问令牌<span class="hint" id="tokenHint">设备 Token 或登录 Token；留空则以游客身份访问</span></span>
       <input type="password" id="meowToken" placeholder="留空表示不修改" autocomplete="new-password">
     </label>
     <div class="row">
@@ -261,6 +261,20 @@
       const online = s.online ? (s.meow.ok ? 'ok' : 'bad') : 'off';
       row.appendChild(pill(s.online ? (s.meow.ok ? 'Meow 已连接' : 'Meow 未连接') : '在线搜索已关闭', online, s.meow.url));
       if (s.online && s.meow.ok) row.appendChild(pill('已映射 ' + s.guid_map + ' 首', ''));
+      // 额度：登录身份（令牌有效）时 Meow 只回 logged_in，剩余数缺省为 0，
+      // 不能把 0 读成"用完了"，所以先判断 logged_in。
+      const q = s.meow && s.meow.quota;
+      if (s.online && s.meow.ok && q && q.limit > 0) {
+        if (q.logged_in) {
+          row.appendChild(pill('试听额度不限', 'ok', 'Meow 已认出扩展配置的访问令牌'));
+        } else {
+          row.appendChild(pill(
+            '游客额度 ' + q.remaining + '/' + q.limit,
+            q.remaining > 0 ? '' : 'bad',
+            q.remaining > 0 ? '今日已听 ' + q.used + ' 首' : '今日额度已用完：去 Meow 登录，或把设备 Token 填进上方「访问令牌」'
+          ));
+        }
+      }
       if (s.youtube && s.youtube.selected) {
         row.appendChild(pill(
           s.youtube.configured ? 'YouTube 已接入' : 'YouTube 未填地址',
@@ -327,7 +341,7 @@
 
     $('meowUrl').value = cfg.meow_url || '';
     $('meowToken').value = '';
-    $('tokenHint').textContent = state.tokenSet ? '已设置，留空则不修改' : '上游未启用鉴权时留空';
+    $('tokenHint').textContent = state.tokenSet ? '已设置，留空则不修改' : '设备 Token 或登录 Token；留空则以游客身份访问';
     $('searchLimit').value = cfg.search_limit || 30;
     $('searchTimeout').value = cfg.search_timeout_s || 5;
     $('onlineEnabled').checked = !!cfg.online_enabled;

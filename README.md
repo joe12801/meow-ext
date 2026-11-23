@@ -64,7 +64,7 @@ sudo ./scripts/install.sh --uninstall
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `meow_url` | `http://127.0.0.1:2233` | MeowMusicServer 地址，含 `http://` |
-| `meow_token` | 空 | 上游启用鉴权时填写 |
+| `meow_token` | 空 | Meow 访问令牌，**设备 Token 或登录 Token 都可以**；留空则以游客身份访问（受 20 首/天限制） |
 | `sources` | 空 | 启用的音源键名；**留空 = 由 Meow 决定** |
 | `search_limit` | 30 | 单次从 Meow 拉的候选条数 |
 | `online_enabled` | true | 关掉后退化为纯透传 |
@@ -175,7 +175,17 @@ X-Guest-Quota: exhausted
 游客每日试听 20 首已用完，登录后不限
 ```
 
-扩展**不会**把它翻译成自己的错误，而是连状态码、`Retry-After`、`X-Guest-Quota` 和那句原文一起透传给客户端——用户需要知道该等一小时还是去登录 Meow。在 Meow 里登录（或给扩展配 `meow_token`）即可解除；把 Meow 的 `GUEST_DAILY_SONGS` 设成 `0` 也能关闭限额。
+扩展**不会**把它翻译成自己的错误，而是连状态码、`Retry-After`、`X-Guest-Quota` 和那句原文一起透传给客户端——用户需要知道该等一小时还是去登录 Meow。
+
+### 解除 20 首限制
+
+Meow 认三种凭据，按 **设备 Token → Bearer → 会话 Cookie** 的顺序依次尝试（见它 `resolveUserID()`）：只要能识别出身份，就不再按游客计数。扩展手上只有一串 token、无从判断类型，所以 `meow_token` 会**同时**发 `X-Device-Token` 和 `Authorization: Bearer`，两种都能用：
+
+- **设备 Token（最省事）**：Meow 的 `files/devices.json` 里已经绑定过的设备 token，例如那台 ESP32 播放器。填进去立刻解除限制，不用密码。也可以 `curl -H 'X-Device-Token: <token>' http://<meow>/api/device/list` 确认它仍有效。
+- **登录 Token**：`POST /api/auth/login`（JSON `{username, password}`）返回的 `token`。
+- 或者把 Meow 的 `GUEST_DAILY_SONGS` 设成 `0`，彻底关掉游客限额。
+
+管理页会直接显示当前额度（`游客额度 3/20` 或 `试听额度不限`），来源是 `/api/guest/quota`。注意：已登录时 Meow 只回 `logged_in:true`，不再给剩余数——所以看到「不限」不是解析失败。
 
 两个容易踩的坑：
 
