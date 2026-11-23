@@ -31,6 +31,9 @@ type Server struct {
 	guids    *GUIDRegistry
 	upstream *Upstream
 	images   *http.Client
+	// meta 负责给在线曲目补封面与歌词（网易云公开接口）。
+	// 与 cfg 无关地常驻：配置只决定用不用它，不决定要不要重建缓存。
+	meta *metaResolver
 
 	startedAt time.Time
 }
@@ -51,6 +54,7 @@ func NewServer(cfg Config, cfgPath string) *Server {
 				TLSHandshakeTimeout: 8 * time.Second,
 			},
 		},
+		meta:      newMetaResolver(),
 		startedAt: time.Now(),
 	}
 	if err := s.guids.Load(); err != nil {
@@ -125,6 +129,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	case path == "/music/api/v1/track/lyrics" || strings.HasPrefix(path, "/music/api/v1/track/lyrics/"):
 		s.handleLyrics(w, r, tailSegment(path, "/music/api/v1/track/lyrics/"))
+		return
+	// 飞牛 1.1.x 播放页真正打的是这个路径（见 lyric.go 顶部的说明）。
+	case path == "/music/api/v1/lyric/list" || strings.HasPrefix(path, "/music/api/v1/lyric/list/"):
+		s.handleLyricList(w, r, tailSegment(path, "/music/api/v1/lyric/list/"))
 		return
 	case strings.HasPrefix(path, "/music/api/v1/detail/lyrics/"):
 		s.handleLyrics(w, r, tailSegment(path, "/music/api/v1/detail/lyrics/"))

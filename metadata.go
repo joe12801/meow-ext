@@ -33,10 +33,15 @@ func (s *Server) handleTrackMetadata(w http.ResponseWriter, r *http.Request) {
 		s.upstream.ServeHTTP(w, r)
 		return
 	}
+	// 专辑名只是锦上添花：只读缓存，绝不为它多等一次外网检索。
+	album := ""
+	if s.Config().MetaEnabled {
+		album = s.metaPeek(ref).Album
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code": 0,
 		"msg":  "",
-		"data": buildTrackMetadata(guid, real, ref),
+		"data": buildTrackMetadata(guid, real, ref, album),
 	})
 }
 
@@ -44,7 +49,7 @@ func (s *Server) handleTrackMetadata(w http.ResponseWriter, r *http.Request) {
 //
 // guid 必须是客户端拿到的那个伪 id：前端会把 metadata 里的 track.guid 当作
 // 播放用的 track.id，一旦换成真 id，后续取流就查不到映射了。
-func buildTrackMetadata(guid, realID string, ref MeowRef) map[string]any {
+func buildTrackMetadata(guid, realID string, ref MeowRef, album string) map[string]any {
 	title := strings.TrimSpace(ref.Song)
 	if title == "" {
 		title = "未知曲目"
@@ -73,7 +78,7 @@ func buildTrackMetadata(guid, realID string, ref MeowRef) map[string]any {
 		"track": map[string]any{
 			"guid":       guid,
 			"title":      title,
-			"album":      "",
+			"album":      strings.TrimSpace(album),
 			"artists":    artists,
 			"genres":     []string{},
 			"coverId":    guid,

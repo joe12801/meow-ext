@@ -408,6 +408,9 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 		// 在线搜索失败不影响本地结果，但要留下可诊断的日志。
 		log.Printf("[search] 在线搜索失败 keyword=%q: %v", keyword, onlineRes.err)
 	}
+	// 封面在后台预热：等用户滚动到列表时海报已经在缓存里，
+	// 否则每一格都要先等一次外网检索，屏幕上会先铺满 LOGO。
+	s.warmCovers(onlineRes.tracks)
 
 	if parseErr != nil || parsed.Code != 0 {
 		// 官方这次没给出可用结果：可能是 token 失效（实测有的机器上

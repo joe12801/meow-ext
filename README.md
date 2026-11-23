@@ -19,7 +19,9 @@
         ├── 本地曲库 / 播放列表 / 设置 等 ──► 官方后端（原样透传）
         ├── 搜索          ──► 官方结果 + Meow /api/search 合并
         ├── 播放 / 拖动进度 ──► Meow /stream_live（含 Range）
-        ├── 歌词          ──► Meow /api/lyric
+        ├── 歌词          ──► Meow /api/lyric → 网易云兜底
+        ├── 海报          ──► 网易云专辑封面 / YouTube 缩略图
+        │                      （取不到时回音源 LOGO 占位）
         └── 管理页         ──► /app/meow-ext/（桌面图标进入）
                                      │
                                      ▼
@@ -65,6 +67,7 @@ sudo ./scripts/install.sh --uninstall
 | `sources` | 空 | 启用的音源键名；**留空 = 由 Meow 决定** |
 | `search_limit` | 30 | 单次从 Meow 拉的候选条数 |
 | `online_enabled` | true | 关掉后退化为纯透传 |
+| `meta_enabled` | true | 自动补全专辑海报与歌词（网易云公开接口）；关掉后只显示音源 LOGO |
 | `search_timeout_s` | 5 | 搜索超时；超时只是不给在线结果，官方结果照常 |
 | `stream_timeout_s` | 300 | 取流超时；Meow 首次点歌要转码，给足时间 |
 | `lyric_timeout_s` | 8 | 歌词超时 |
@@ -75,7 +78,7 @@ sudo ./scripts/install.sh --uninstall
 | `youtube_bitrate` | 192 | 转 MP3 码率，只接受 64/96/128/192/256/320 |
 | `youtube_max_duration_s` | 900 | 搜索阶段丢掉更长的视频，0 = 不过滤 |
 
-环境变量：`MEOW_EXT_URL`、`MEOW_EXT_TOKEN`、`MEOW_EXT_SOURCES`、`MEOW_EXT_ONLINE`、`MEOW_EXT_CONFIG`、`MEOW_EXT_DATA_DIR`、`MEOW_EXT_STATE_DIR`、`MEOW_EXT_GATEWAY_SOCKET`、`MEOW_EXT_YOUTUBE_URL`、`MEOW_EXT_YOUTUBE_KEY`、`MEOW_EXT_YOUTUBE_BITRATE`。
+环境变量：`MEOW_EXT_URL`、`MEOW_EXT_TOKEN`、`MEOW_EXT_SOURCES`、`MEOW_EXT_ONLINE`、`MEOW_EXT_META`、`MEOW_EXT_CONFIG`、`MEOW_EXT_DATA_DIR`、`MEOW_EXT_STATE_DIR`、`MEOW_EXT_GATEWAY_SOCKET`、`MEOW_EXT_YOUTUBE_URL`、`MEOW_EXT_YOUTUBE_KEY`、`MEOW_EXT_YOUTUBE_BITRATE`。
 
 ### YouTube（可选）
 
@@ -91,6 +94,17 @@ Meow 只内置国内那 9 个音源，二进制里没有 YouTube 相关实现，
 在管理页填地址和 Key，再把音源列表里的 **YouTube** 勾上即可。它和 Meow 是两条独立链路：Meow 挂了不影响 YouTube，反之亦然；搜索时两边并发，结果按配额交替排布，不会互相挤掉。
 
 YouTube 搜歌回来常是 MV、翻唱、几十分钟合集，`youtube_max_duration_s` 用来把它们挡在搜索结果之外（默认 900 秒）——服务端下载也有同样的时长上限，超了会直接失败，所以必须在搜索阶段滤掉。
+
+### 海报与歌词是怎么来的
+
+Meow 的 `/api/search` 只给歌名、歌手和时长，`cover_url` 恒为空，缓存目录里也只有 `music.mp3`，没有 `cover.jpg` / `lyric.lrc`。而飞牛的海报位和歌词面板完全依赖扩展自己出图出词，所以这两块由扩展补齐：
+
+- **海报**：按「歌名 + 歌手」检索网易云公开接口 `POST /api/cloudsearch/pc`，取 `al.picUrl`（专辑封面），再按客户端要的 `size` 拼 `?param=NNNyNNN` 取缩略图——原图单张能到 7MB，不裁剪会把流量吃满。YouTube 走确定性地址 `i.ytimg.com/vi/<video_id>/maxresdefault.jpg`，无需检索。
+- **歌词**：音乐源先问 Meow 的 `/api/lyric`，取不到再落到网易云的 `/api/song/lyric`；YouTube 走 mp3api 的 `/api/lyrics`。接口是 `GET /music/api/v1/lyric/list?trackGUID=`（飞牛 1.1.x 播放页真正打的路径），返回 `data.list[].content` 为标准 LRC。
+- **先 LOGO 后海报**：海报解析不出来时先回音源 LOGO 占位（`Cache-Control: max-age=60`，短缓存才不会把占位钉死），解析完成后同一 URL 再请求就是海报（`max-age=86400`）。搜索返回后还会后台预热前 12 首的封面，滚到列表时通常已经是海报。
+- **不乱配**：B 站、喜马拉雅、荔枝上多是视频教程、有声书、电台，标题常把一首真歌名包在里面。它们的歌词一律留空，有声书/电台的封面只接受标题完全一致的候选——错封面、错歌词比没有更刺眼。
+
+补全全程是「尽力而为」：超时、风控、搜不到都只是静默降级，不影响搜索与播放。`meta_enabled: false` 可整块关掉。
 
 ## 命令
 

@@ -154,6 +154,10 @@
       <input type="checkbox" id="onlineEnabled">
       <span>在官方搜索结果后追加在线曲目</span>
     </label>
+    <label class="toggle" style="margin-bottom:14px">
+      <input type="checkbox" id="metaEnabled">
+      <span>自动补全专辑海报与歌词<span class="hint">按歌名检索网易云公开接口；取不到时显示音源 LOGO</span></span>
+    </label>
 
     <div style="margin-bottom:8px;font-size:13px;font-weight:500">
       启用的音源<span class="hint">全不选 = 由 Meow 自己决定</span>
@@ -327,6 +331,7 @@
     $('searchLimit').value = cfg.search_limit || 30;
     $('searchTimeout').value = cfg.search_timeout_s || 5;
     $('onlineEnabled').checked = !!cfg.online_enabled;
+    $('metaEnabled').checked = cfg.meta_enabled !== false;
     state.ytKeySet = !!cfg.youtube_key_set;
     $('ytUrl').value = cfg.youtube_api_url || '';
     $('ytKey').value = '';
@@ -412,6 +417,7 @@
       search_limit: parseInt($('searchLimit').value, 10) || 30,
       search_timeout_s: parseInt($('searchTimeout').value, 10) || 5,
       online_enabled: $('onlineEnabled').checked,
+      meta_enabled: $('metaEnabled').checked,
       youtube_api_url: $('ytUrl').value.trim(),
       youtube_bitrate: parseInt($('ytBitrate').value, 10) || 192,
       youtube_max_duration_s: ($('ytMaxDuration').value === '' ? 0 : parseInt($('ytMaxDuration').value, 10))

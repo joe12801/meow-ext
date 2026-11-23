@@ -92,6 +92,7 @@ type configView struct {
 	Sources        []string `json:"sources"`
 	SearchLimit    int      `json:"search_limit"`
 	OnlineEnabled  bool     `json:"online_enabled"`
+	MetaEnabled    bool     `json:"meta_enabled"`
 	SearchTimeout  int      `json:"search_timeout_s"`
 	StreamTimeout  int      `json:"stream_timeout_s"`
 	LyricTimeout   int      `json:"lyric_timeout_s"`
@@ -114,6 +115,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			Sources:            cfg.Sources,
 			SearchLimit:        cfg.SearchLimit,
 			OnlineEnabled:      cfg.OnlineEnabled,
+			MetaEnabled:        cfg.MetaEnabled,
 			SearchTimeout:      cfg.SearchTimeout,
 			StreamTimeout:      cfg.StreamTimeout,
 			LyricTimeout:       cfg.LyricTimeout,
@@ -140,6 +142,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		Sources       *[]string `json:"sources"`
 		SearchLimit   *int      `json:"search_limit"`
 		OnlineEnabled *bool     `json:"online_enabled"`
+		MetaEnabled   *bool     `json:"meta_enabled"`
 		SearchTimeout *int      `json:"search_timeout_s"`
 		StreamTimeout *int      `json:"stream_timeout_s"`
 		LyricTimeout  *int      `json:"lyric_timeout_s"`
@@ -182,6 +185,9 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.OnlineEnabled != nil {
 		cfg.OnlineEnabled = *body.OnlineEnabled
+	}
+	if body.MetaEnabled != nil {
+		cfg.MetaEnabled = *body.MetaEnabled
 	}
 	if body.SearchTimeout != nil {
 		cfg.SearchTimeout = *body.SearchTimeout

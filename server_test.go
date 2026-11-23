@@ -91,6 +91,12 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 				{Title: "夜曲", Artist: "周杰伦", Source: "netease", URL: "http://h/stream_live?song=a&singer=b&bv=BV1TEST", Duration: 200},
 			})
 		case "/api/lyric":
+			// song=NO_LYRIC 模拟"这首歌没歌词"：Meow 这时回 404，
+			// 扩展要把它翻成 code:0 + 空列表而不是错误。
+			if strings.Contains(r.URL.RawQuery, "NO_LYRIC") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			io.WriteString(w, "[00:00.00]测试歌词")
 		case "/stream_live":
 			// song=QUOTA 用来模拟 Meow 的游客额度闸门：
@@ -116,6 +122,8 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	cfg.MeowURL = env.meow.URL
 	cfg.DataDir = dir
 	cfg.StateDir = dir
+	// 测试里关掉封面/歌词补全：它要打外网，会让用例变慢且不稳定。
+	cfg.MetaEnabled = false
 	env.server = NewServer(cfg, filepath.Join(dir, "config.json"))
 	return env
 }

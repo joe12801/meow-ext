@@ -78,38 +78,16 @@ func stripCoverIDPrefixes(id string) string {
 	}
 }
 
-// sourceOfCoverID 判断这个封面 id 是不是本扩展下发的在线曲目。
+// serveSourceLogo 输出音源 LOGO（见下方注释）。
 //
-// 第二个返回值表示"是不是我们的"，与音源是否识别出来无关：
-// 只要认得是自家 id 就不该再丢给官方——官方对未知 coverId 只会回 400。
-func (s *Server) sourceOfCoverID(id string) (string, bool) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", false
-	}
-	// 原样试一次（兼容客户端直接传 online: 真 id），剥前缀再试一次（前端常态）。
-	for _, c := range []string{id, stripCoverIDPrefixes(id)} {
-		real, ok := s.guids.Resolve(c)
-		if !ok {
-			continue
-		}
-		ref, ok := DecodeGUID(real)
-		if !ok {
-			return "", true
-		}
-		return ref.Source, true
-	}
-	return "", false
-}
-
-// serveSourceLogo 输出音源 LOGO。
-//
-// 缓存一周且标 immutable：图随二进制发布，同一 URL 的内容在进程生命周期内不会变。
+// 缓存刻意给得很短（60 秒）：它是"海报还没解析出来"的占位图，
+// 一旦标成 immutable 一周，客户端就会把 LOGO 钉死在这个 URL 上，
+// 之后即使海报已经就绪也换不回来——正是"只显示音源 LOGO"的成因。
 func serveSourceLogo(w http.ResponseWriter, r *http.Request, source string) {
 	png := sourceLogo(source)
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", strconv.Itoa(len(png)))
-	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+	w.Header().Set("Cache-Control", logoCacheControl)
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		w.Write(png)

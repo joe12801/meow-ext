@@ -36,6 +36,12 @@ type Config struct {
 	// Meow 的 /stream_live 命中缓存时用 http.ServeContent 提供完整 Range 支持，
 	// 所以默认直传即可；置 false 仅用于排障（强制整段拉取）。
 	StreamDirectRanges bool `json:"stream_direct_ranges"`
+	// MetaEnabled 决定要不要用网易云公开接口给在线曲目补专辑封面与歌词。
+	//
+	// Meow 的搜索结果 cover_url 恒为空、缓存目录里也没有 cover.jpg，
+	// 不补就只能显示音源 LOGO、歌词页一片空白。补全是"尽力而为"：
+	// 检索不到时静默回退，不影响播放。关掉后恢复成纯 LOGO + Meow 歌词。
+	MetaEnabled bool `json:"meta_enabled"`
 
 	// ---- 超时（秒）----
 	// SearchTimeout 要小于飞牛客户端的等待上限，否则用户看到的是客户端超时
@@ -96,6 +102,7 @@ func DefaultConfig() Config {
 		SearchLimit:        30,
 		OnlineEnabled:      true,
 		StreamDirectRanges: true,
+		MetaEnabled:        true,
 		SearchTimeout:      5,
 		StreamTimeout:      300,
 		LyricTimeout:       8,
@@ -168,6 +175,10 @@ func applyEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("MEOW_EXT_ONLINE")); v != "" {
 		cfg.OnlineEnabled = isTruthy(v)
+	}
+	// 只认显式关闭：写成 MEOW_EXT_META=0/off 才关，留空保持默认开启。
+	if v := strings.TrimSpace(os.Getenv("MEOW_EXT_META")); v != "" {
+		cfg.MetaEnabled = isTruthy(v)
 	}
 }
 

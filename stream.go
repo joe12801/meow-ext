@@ -149,31 +149,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, pathGUID s
 }
 
 // handleLyrics 是 /music/api/v1/track/lyrics 的实现。
+//
+// 飞牛 1.1.x 的播放页实际打的是 /lyric/list（见 lyric.go），
+// 这个路径是给旧版客户端与手工排障留的，两边共用同一份取词逻辑。
 func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request, pathGUID string) {
 	ref, ok := s.resolveMeowRef(extractGUID(r, pathGUID))
 	if !ok {
 		s.upstream.ServeHTTP(w, r)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.LyricTimeout)*time.Second)
-	defer cancel()
-
-	text, err := "", error(nil)
-	if ref.Source == youtubeSourceKey {
-		// YouTube 的歌词来自 mp3api 的 /api/lyrics（lrclib/字幕），
-		// 与 Meow 的 /api/lyric 是两套，按来源分别取。
-		yt := s.youtubeClient()
-		if yt == nil {
-			text, err = "", nil
-		} else {
-			text, err = yt.Lyric(ctx, ref.XID)
-		}
-	} else {
-		text, err = s.meow.Lyric(ctx, ref.Song, ref.Singer)
-	}
-	if err != nil {
-		log.Printf("[lyrics] 取歌词失败 song=%q: %v", ref.Song, err)
-	}
+	text := s.lyricFor(r.Context(), ref)
 	// 即便没取到也返回 code:0 + 空串：客户端收到错误码会弹提示，
 	// 而"这首纯音乐没有歌词"不该被当成故障。
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -187,10 +172,35 @@ func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request, pathGUID s
 	})
 }
 
+// 封面相关的两种缓存策略。
+//
+// 海报一旦出图就不会变，可以长缓存；LOGO 是"海报还没解析好"的占位，
+// 必须短缓存——给它 immutable 一周，客户端会把占位图钉死在那里，
+// 之后就算海报已经就绪也永远看不到，正好是用户反馈的"只有音源 LOGO"。
+const (
+	posterCacheControl = "public, max-age=86400"
+	logoCacheControl   = "public, max-age=60"
+)
+
+// coverWait 决定"为一首歌等海报多久"。
+//
+// 播放页的大图是用户真正会盯着看的地方，值得多等一会儿；
+// 列表缩略图也别给太短：客户端按 URL 做内存缓存，一旦先拿到 LOGO，
+// 同一个格子在这次会话里就不会再请求第二次，海报要重开页面才出现。
+func coverWait(size int) time.Duration {
+	if size >= 300 {
+		return 2000 * time.Millisecond
+	}
+	return 1200 * time.Millisecond
+}
+
 // handleCover 把在线曲目的封面转给客户端。
 //
 // 直接把客户端的封面请求重定向到源站也可以，但会踩两个坑：
 // 源站常校验 Referer/UA、且不少 CDN 不允许跨域。走本进程代理一次最省心。
+//
+// 三级回退：真实海报（网易云专辑图 / YouTube 缩略图）→ 音源 LOGO → 官方。
+// LOGO 只是占位，配短缓存，海报就绪后下一次请求就会替换掉。
 func (s *Server) handleCover(w http.ResponseWriter, r *http.Request) {
 	coverURL := strings.TrimSpace(r.URL.Query().Get("url"))
 	if coverURL == "" {
@@ -201,59 +211,115 @@ func (s *Server) handleCover(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// 有真实封面地址就代理它；没有则看是不是我们下发的伪 coverId。
-	//
-	// 官方 /static/cover 只认自己库里的 coverId，我们的伪 id 在那边一律 400，
-	// 列表里就只剩灰色音符占位图。在线曲目本来也拿不到真实封面
-	// （Meow 的搜索结果 cover_url 为空），正好用这个位置显示音源标识。
-	if coverURL == "" || !(strings.HasPrefix(coverURL, "http://") || strings.HasPrefix(coverURL, "https://")) {
-		if id := coverIDParam(r); id != "" {
-			if source, ok := s.sourceOfCoverID(id); ok {
-				serveSourceLogo(w, r, source)
-				return
-			}
+	// 有真实封面地址就代理它。
+	if coverURL != "" && (strings.HasPrefix(coverURL, "http://") || strings.HasPrefix(coverURL, "https://")) {
+		if s.proxyImage(w, r, coverURL, posterCacheControl) {
+			return
 		}
+	}
+
+	id := coverIDParam(r)
+	ref, known := s.coverRef(id)
+	if !known {
+		// 官方 /static/cover 只认自己库里的 coverId，认不出就一定不是我们的。
 		s.upstream.ServeHTTP(w, r)
 		return
 	}
-	s.proxyImage(w, r, coverURL)
+
+	size := coverSize(r)
+	ctx, cancel := context.WithTimeout(r.Context(), coverWait(size)+time.Second)
+	defer cancel()
+	for _, candidate := range s.coverCandidates(ctx, ref, coverWait(size)) {
+		if s.proxyImage(w, r, withCoverSize(candidate, size), posterCacheControl) {
+			return
+		}
+	}
+	serveSourceLogo(w, r, ref.Source)
 }
 
-func (s *Server) proxyImage(w http.ResponseWriter, r *http.Request, imageURL string) {
+// coverRef 从封面 id 还原出曲目信息。
+func (s *Server) coverRef(id string) (MeowRef, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return MeowRef{}, false
+	}
+	for _, c := range []string{id, stripCoverIDPrefixes(id)} {
+		real, ok := s.guids.Resolve(c)
+		if !ok {
+			continue
+		}
+		ref, ok := DecodeGUID(real)
+		if !ok {
+			return MeowRef{}, true
+		}
+		return ref, true
+	}
+	return MeowRef{}, false
+}
+
+// coverSize 取客户端要的缩略图边长。飞牛列表用 120/160，播放页用 400~1600。
+func coverSize(r *http.Request) int {
+	n, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("size")))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > 1600 {
+		n = 1600
+	}
+	return n
+}
+
+// withCoverSize 给网易云的封面地址拼尺寸参数。
+//
+// 不拼的话拿到的是原图（实测单张 7MB），一首歌的封面就能吃掉几秒带宽；
+// 拼上 ?param=600y600 后只有 300KB。别的源不认这个参数，别乱加。
+func withCoverSize(rawURL string, size int) string {
+	if size <= 0 || !strings.Contains(rawURL, "music.126.net") {
+		return rawURL
+	}
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
+	}
+	return rawURL + sep + "param=" + strconv.Itoa(size) + "y" + strconv.Itoa(size)
+}
+
+// proxyImage 把远端图片转发给客户端，返回是否真的出图了。
+func (s *Server) proxyImage(w http.ResponseWriter, r *http.Request, imageURL, cacheControl string) bool {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
 	if err != nil {
-		http.Error(w, "封面地址非法", http.StatusBadRequest)
-		return
+		return false
 	}
 	// 部分音源站会拦空 UA。
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; meow-ext/1.0)")
 	req.Header.Set("Referer", originOf(imageURL))
 	resp, err := s.images.Do(req)
 	if err != nil {
-		http.Error(w, "封面获取失败", http.StatusBadGateway)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "封面不可用", http.StatusNotFound)
-		return
+		return false
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	// 只认图片：源站风控时常返回 200 的 HTML 页面，转给客户端就是一张裂图。
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		return false
 	}
+	w.Header().Set("Content-Type", ct)
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n <= 8<<20 {
 			w.Header().Set("Content-Length", cl)
 		}
 	}
-	// 封面基本不变，让客户端缓存一天，减少来回。
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", cacheControl)
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		io.Copy(w, io.LimitReader(resp.Body, 8<<20))
 	}
+	return true
 }
 
 func originOf(raw string) string {
