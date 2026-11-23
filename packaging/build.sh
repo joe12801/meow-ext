@@ -84,8 +84,16 @@ for arch in ${PLATFORMS}; do
     # ---- 2. 打成 app.tgz ----
     # 这是飞牛 FPK 的硬性约定：应用主体必须是包内顶层的一个 app.tgz，
     # 缺了它应用中心会直接报 ErrCodePackageException（"应用包不符合系统要求"）。
-    # 用 -C app . 让归档内顶层就是 bin/ ui/ systemd/，解压后直接落在 target/ 下。
-    tar czf "${stage}/app.tgz" -C "${stage}/app" .
+    # 归档内顶层必须是 bin/ ui/ systemd/，解压后直接落在 target/ 下。
+    #
+    # 不能写 `tar czf x.tgz -C dir .`：句点会让每条记录都带 "./" 前缀，
+    # 而应用中心按精确名字取包内文件，带前缀就一个都匹配不上，
+    # 报的是"应用包不符合系统要求"，完全看不出原因。
+    # 也不能用 `find | tar -T -`：tar 遇到目录条目会再递归一次，
+    # 与 find 已列出的文件重复，第二份被存成指向自己的硬链接。
+    # 显式列出顶层成员最稳，目录内容由 tar 自己递归。
+    tar czf "${stage}/app.tgz" --owner=0 --group=0 --numeric-owner \
+        -C "${stage}/app" bin ui systemd
     rm -rf "${stage}/app"
 
     # ---- 3. manifest（checksum 必须是 app.tgz 的 md5，构建期算完注入）----
@@ -109,11 +117,26 @@ for arch in ${PLATFORMS}; do
     _sz=$(wc -c < "${stage}/app.tgz")
     # app.tgz 过小说明打包中断（真实应用至少几百 KB）。
     [ "${_sz}" -gt 10240 ] || die "app.tgz 只有 ${_sz} 字节，明显不完整"
-
     pkg="${OUT}/meow-ext-${VERSION}-${arch}.fpk"
     rm -f "${pkg}"
-    # FPK 就是 tar.gz，只是扩展名不同；用 -9 压，包里九成是二进制，压得动。
-    tar czf "${pkg}" -C "${stage}" .
+    # FPK 就是 tar.gz，只是扩展名不同。
+    # 同样显式列顶层成员：应用中心记录的是
+    # dirs="[cmd config wizard]" files="[ICON.PNG ICON_256.PNG app.tgz manifest]"，
+    # 靠精确名枚举，条目名不能带 "./" 前缀。
+    tar czf "${pkg}" --owner=0 --group=0 --numeric-owner -C "${stage}" \
+        manifest app.tgz ICON.PNG ICON_256.PNG cmd config wizard
+
+    # 自检：任何条目带 "./" 前缀都会被应用中心判为"应用包不符合系统要求"。
+    # 这个坑只在真机安装时暴露，且报错完全看不出原因，必须在打包期拦住。
+    if tar tzf "${pkg}" 2>/dev/null | grep -q '^\./'; then
+        die "FPK 条目带了 ./ 前缀，应用中心会拒装：$(tar tzf "${pkg}" | head -2 | tr '\n' ' ')"
+    fi
+    if tar tzf "${stage}/app.tgz" 2>/dev/null | grep -q '^\./'; then
+        die "app.tgz 条目带了 ./ 前缀"
+    fi
+    # 重复条目会被存成指向自己的硬链接，包能打出来但内容不完整。
+    _dup=$(tar tzf "${pkg}" 2>/dev/null | sort | uniq -d)
+    [ -z "${_dup}" ] || die "FPK 里有重复条目：${_dup}"
     log "产出 $(du -h "${pkg}" | cut -f1) ${pkg}"
     rm -rf "${stage}"
 done

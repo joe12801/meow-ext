@@ -58,8 +58,10 @@ if __name__ == "__main__":
     (fpk / "app/ui/images").mkdir(parents=True, exist_ok=True)
 
     big = build(256)
-    big.save(fpk / "ICON_256.PNG", "PNG")
-    build(64).save(fpk / "ICON.PNG", "PNG")
+    # ICON.PNG / ICON_256.PNG 是应用中心与桌面读的两张主图。
+    # 官方样例（fnmedia-ext）里两张都是 512×512，这里对齐——尺寸不符同样会被判包异常。
+    build(512).save(fpk / "ICON.PNG", "PNG")
+    build(512).save(fpk / "ICON_256.PNG", "PNG")
     # icons/ 供打包脚本取用；app/ui/images/ 是飞牛桌面直接读的落地位置，
     # 两处都写，避免绕开 build.sh 手工打包时缺图。
     big.save(fpk / "icons/icon_256.png", "PNG")

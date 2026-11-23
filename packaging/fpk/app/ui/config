@@ -10,7 +10,13 @@
             "url": "/app/meow-ext/",
             "allUsers": false,
             "gatewaySocket": "meow-ext.sock",
-            "gatewayPrefix": "/app/meow-ext"
+            "gatewayPrefix": "/app/meow-ext",
+            "control": {
+                "accessPerm": "readonly",
+                "portPerm": "hidden",
+                "pathPerm": "hidden",
+                "fullUrlPerm": "hidden"
+            }
         }
     }
 }
