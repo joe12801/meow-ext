@@ -83,7 +83,10 @@ type AudioSpecVO struct {
 //
 // fakeID 是已经过 32-hex 伪装的 id：官方 App 会按 id 形态过滤条目，
 // 非 32-hex 的 id 会被整条丢弃，所以这里只认伪装值。
-func buildTrackVO(meowID, fakeID string, t MeowTrack) TrackVO {
+//
+// album 由调用方从补全缓存里取，只读不阻塞：列表页的"专辑"列以前恒为空，
+// 而播放页其实已经拿到专辑名了，同一个数据没理由只在半条链路上生效。
+func buildTrackVO(meowID, fakeID string, t MeowTrack, album string) TrackVO {
 	title := strings.TrimSpace(t.Title)
 	artist := strings.TrimSpace(t.Artist)
 	if title == "" {
@@ -120,12 +123,12 @@ func buildTrackVO(meowID, fakeID string, t MeowTrack) TrackVO {
 		Artist:  artist,
 		Artists: artists,
 		Album: AlbumVO{
-			Name:    "",
+			Name:    album,
 			GUID:    fakeID + ":album",
 			Artists: artists,
 			CoverID: fakeID,
 		},
-		AlbumName: "",
+		AlbumName: album,
 		AudioSpec: AudioSpecVO{
 			Path:      specName,
 			Format:    "mp3",
@@ -148,9 +151,9 @@ func buildTrackVO(meowID, fakeID string, t MeowTrack) TrackVO {
 		CoverURL3:  t.CoverURL,
 		Source:     "meow",
 		IsOnline:   true,
-		// 歌词按需拉取：Meow 有 /api/lyric，绝大多数曲目都能拿到；
-		// 声明为 true 客户端才会显示歌词入口，真没词时端点返回空串。
-		HasLyric:     true,
+		// 歌词入口要按来源给：以前一律写 true，结果视频、有声书、电台
+		// 也带一个歌词按钮，点进去永远是空白面板。取不到词的来源就不声明。
+		HasLyric:     hasLyricFor(t.Source),
 		Genres:       []string{},
 		AccessStatus: 0,
 	}
@@ -253,13 +256,12 @@ func interleave(a, b []MeowTrack) []MeowTrack {
 
 // searchOnline 汇总所有在线源：Meow 的多音源，加上可选的 YouTube。
 //
-// 两者并发：YouTube 走公网 + yt-dlp，比本机 Meow 慢得多，串行执行会把
-// 整个搜索拖到超时。任一侧失败都不影响另一侧——用户至少能搜到东西。
+// 外面套了一层短期缓存（见 search_cache.go）：前端是"输入即搜"，
+// 同一个词连打几次、或者一次输入里的每个前缀，都不该各自打一轮外网。
 func (s *Server) searchOnline(ctx context.Context, keyword string) ([]MeowTrack, error) {
 	cfg := s.Config()
 	meowSources, ytOn := splitYoutubeSource(cfg.Sources)
-	yt := s.youtubeClient()
-	if yt == nil {
+	if s.youtubeClient() == nil {
 		ytOn = false
 	}
 	limit := cfg.SearchLimit
@@ -267,8 +269,107 @@ func (s *Server) searchOnline(ctx context.Context, keyword string) ([]MeowTrack,
 		limit = 30
 	}
 
+	norm := normalizeQuery(keyword)
+	if norm == "" {
+		return nil, nil
+	}
+	key := searchCacheKey{q: norm, sig: cacheSignature(meowSources, ytOn, limit)}
+	// 先记下这次的关键词：后台刷新的 stale 判断依赖它。
+	s.searchCache.note(norm)
+
+	if tracks, ok := s.searchCache.get(key); ok {
+		log.Printf("[search] %q 命中结果缓存（%d 条）", keyword, len(tracks))
+		return tracks, nil
+	}
+	// 用户很可能还在打字：先用手上更短关键词的结果顶上，
+	// 真实搜索延后到输入停下来之后再发。
+	if tracks, ok := s.searchCache.prefix(key); ok {
+		s.refreshOnline(key, keyword, meowSources, ytOn, limit)
+		log.Printf("[search] %q 复用前缀结果（%d 条），真实搜索已延后", keyword, len(tracks))
+		return tracks, nil
+	}
+
+	// 更短的那个搜索可能还在跑（用户上一秒刚敲完前几个字）。
+	// 等它，而不是并着头再打一遍全部音源——日志里同一秒出现的
+	// "so"/"som"/"some" 就是这么把请求数放大十倍的。
+	waitTimeout := time.Duration(cfg.SearchTimeout) * time.Second
+	if waitTimeout <= 0 || waitTimeout > searchWaitMax {
+		waitTimeout = searchWaitMax
+	}
+	if s.searchCache.waitRunning(ctx, key, waitTimeout) {
+		if tracks, ok := s.searchCache.get(key); ok {
+			log.Printf("[search] %q 等到在途搜索，直接命中（%d 条）", keyword, len(tracks))
+			return tracks, nil
+		}
+		if tracks, ok := s.searchCache.prefix(key); ok {
+			s.refreshOnline(key, keyword, meowSources, ytOn, limit)
+			log.Printf("[search] %q 等在途搜索结束后复用前缀结果（%d 条）", keyword, len(tracks))
+			return tracks, nil
+		}
+		log.Printf("[search] %q 在途搜索结束但没有可用结果，改为自行搜索", keyword)
+	}
+
+	if !s.searchCache.begin(key) {
+		// 同一个关键词已有请求在跑（前端偶尔会并发发两次）：返回空即可，
+		// 对方会把结果写进缓存，用户下一次输入就能命中。
+		log.Printf("[search] %q 已有相同请求在跑，跳过本次", keyword)
+		return nil, nil
+	}
+	// defer 保证即使 fetchOnline 里 panic，等在后面的请求也不会被永远挂着。
+	defer s.searchCache.end(key)
+	tracks, err := s.fetchOnline(ctx, keyword, meowSources, ytOn, limit)
+	// 只在成功时写入：失败被缓存住的话，用户重试一次也还是拿不到结果。
+	if err == nil {
+		s.searchCache.put(key, tracks)
+	}
+	return tracks, err
+}
+
+// refreshOnline 在用户停止输入后补一次真实搜索。
+//
+// 延迟 searchRefreshDelay 再发：逐字输入时每个前缀都会走到这里，
+// 但只有最后一个关键词的刷新能活下来——前面的醒来时发现
+// 已经被更长的输入取代，直接作废。于是
+// "someone like" / "…y" / "…yo" / "…you" 只产生一次外网往返。
+func (s *Server) refreshOnline(key searchCacheKey, keyword string, meowSources []string, ytOn bool, limit int) {
+	if !s.searchCache.begin(key) {
+		return
+	}
+	go func() {
+		defer s.searchCache.end(key)
+		time.Sleep(searchRefreshDelay)
+		if s.searchCache.stale(key.q) {
+			return
+		}
+		timeout := time.Duration(s.Config().SearchTimeout) * time.Second
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		tracks, err := s.fetchOnline(ctx, keyword, meowSources, ytOn, limit)
+		if err != nil {
+			log.Printf("[search] 后台刷新失败 keyword=%q: %v", keyword, err)
+			return
+		}
+		s.searchCache.put(key, tracks)
+		log.Printf("[search] 后台刷新完成 keyword=%q（%d 条）", keyword, len(tracks))
+	}()
+}
+
+// fetchOnline 真正去打外网：Meow 多音源 + 可选的 YouTube。
+//
+// 两者并发：YouTube 走公网 + yt-dlp，比本机 Meow 慢得多，串行执行会把
+// 整个搜索拖到超时。任一侧失败都不影响另一侧——用户至少能搜到东西。
+func (s *Server) fetchOnline(ctx context.Context, keyword string, meowSources []string, ytOn bool, limit int) ([]MeowTrack, error) {
+	cfg := s.Config()
+	yt := s.youtubeClient()
+	if yt == nil {
+		ytOn = false
+	}
+
 	if !ytOn {
-		return s.meowClient().Search(ctx, keyword, limit, meowSources)
+		return s.searchMeow(ctx, keyword, limit, meowSources)
 	}
 
 	// YouTube 与 Meow 分名额：不分的话，YouTube 拿 limit 条、Meow 也拿 limit 条，
@@ -305,7 +406,7 @@ func (s *Server) searchOnline(ctx context.Context, keyword string) ([]MeowTrack,
 	if len(cfg.Sources) > 0 && len(meowSources) == 0 {
 		// 不请求 Meow。
 	} else {
-		meowTracks, meowErr = s.meowClient().Search(ctx, keyword, meowLimit, meowSources)
+		meowTracks, meowErr = s.searchMeow(ctx, keyword, meowLimit, meowSources)
 	}
 
 	res := <-ytCh
@@ -408,9 +509,10 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 		// 在线搜索失败不影响本地结果，但要留下可诊断的日志。
 		log.Printf("[search] 在线搜索失败 keyword=%q: %v", keyword, onlineRes.err)
 	}
-	// 封面在后台预热：等用户滚动到列表时海报已经在缓存里，
-	// 否则每一格都要先等一次外网检索，屏幕上会先铺满 LOGO。
-	s.warmCovers(onlineRes.tracks)
+	// 封面与专辑名在返回前预热一小段时间：等用户滚到列表时海报已经在缓存里，
+	// 列表页的"专辑"列也有值。完全不等的代价是首屏先铺满 LOGO 再逐格换图，
+	// 而且专辑名永远是空的——搜索本身已经花了一两秒，多等 350ms 换这个很值。
+	s.warmCoversWait(onlineRes.tracks, coverWarmBudget)
 
 	if parseErr != nil || parsed.Code != 0 {
 		// 官方这次没给出可用结果：可能是 token 失效（实测有的机器上
@@ -469,6 +571,7 @@ func (s *Server) mergeOnline(parsed searchResponse, tracks []MeowTrack) (searchR
 		}
 	}
 
+	withMeta := s.Config().MetaEnabled
 	added := 0
 	for _, t := range tracks {
 		if strings.TrimSpace(t.Title) == "" {
@@ -482,7 +585,11 @@ func (s *Server) mergeOnline(parsed searchResponse, tracks []MeowTrack) (searchR
 		ref := trackToRef(t)
 		realID := EncodeGUID(ref)
 		fakeID := s.guids.Fake(realID)
-		list = append(list, buildTrackVO(realID, fakeID, t))
+		album := ""
+		if withMeta {
+			album = s.metaPeek(ref).Album
+		}
+		list = append(list, buildTrackVO(realID, fakeID, t, album))
 		added++
 	}
 	if added == 0 {
@@ -520,6 +627,7 @@ func (s *Server) assembleOnlineOnly(w http.ResponseWriter, header http.Header,
 	tracks []MeowTrack, keyword string, officialCode int, officialStatus int) bool {
 	list := make([]any, 0, len(tracks))
 	seen := make(map[string]struct{}, len(tracks))
+	withMeta := s.Config().MetaEnabled
 	for _, t := range tracks {
 		if strings.TrimSpace(t.Title) == "" {
 			continue
@@ -532,7 +640,11 @@ func (s *Server) assembleOnlineOnly(w http.ResponseWriter, header http.Header,
 		ref := trackToRef(t)
 		realID := EncodeGUID(ref)
 		fakeID := s.guids.Fake(realID)
-		list = append(list, buildTrackVO(realID, fakeID, t))
+		album := ""
+		if withMeta {
+			album = s.metaPeek(ref).Album
+		}
+		list = append(list, buildTrackVO(realID, fakeID, t, album))
 	}
 	if len(list) == 0 {
 		return false

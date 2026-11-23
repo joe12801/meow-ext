@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,6 +75,18 @@ func lyricSourceAllowed(source string) bool {
 	return false
 }
 
+// hasLyricFor 决定列表条目要不要声明"有歌词"。
+//
+// 必须和 lyricFor 的实际能力一致：以前一律写 true，于是视频、有声书、
+// 电台也带一个歌词入口，点进去永远是空白面板——用户以为扩展坏了，
+// 其实是这条内容根本没有歌词可取。取不到词的来源就不再声明。
+func hasLyricFor(source string) bool {
+	if strings.EqualFold(strings.TrimSpace(source), youtubeSourceKey) {
+		return true
+	}
+	return lyricSourceAllowed(source)
+}
+
 // lyricFor 按来源取歌词：YouTube → mp3api，音乐源 → Meow，最后拿网易云兜底。
 //
 // 每一段都有独立的时间预算。这不是过度设计：Meow 的 /api/lyric 是冷启动
@@ -100,19 +113,24 @@ func (s *Server) lyricFor(ctx context.Context, ref MeowRef) string {
 		if step > 3*time.Second {
 			step = 3 * time.Second
 		}
-		mctx, mcancel := context.WithTimeout(ctx, step)
-		text, err := s.meowClient().Lyric(mctx, ref.Song, ref.Singer)
-		mcancel()
-		if err == nil && strings.TrimSpace(text) != "" {
-			return text
-		}
-		if err != nil {
-			// 超时是预期内的降级路径（Meow 冷启动常年超出 3 秒预算，
-			// 后续会落到网易云并通常能拿到词），打成"失败"会让排障的人误判。
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				log.Printf("[lyrics] Meow 取词超出 %s 预算，转网易云兜底 song=%q", step, ref.Song)
-			} else {
-				log.Printf("[lyrics] Meow 取词失败 song=%q: %v", ref.Song, err)
+		// 冷却期内跳过 Meow：它和搜索共用同一份额度，这里再问一次
+		// 只会多一条 429，然后照样落到网易云。直接去兜底更省时间。
+		if _, _, cooling := s.meowCooldown.active(); !cooling {
+			mctx, mcancel := context.WithTimeout(ctx, step)
+			text, err := s.meowClient().Lyric(mctx, ref.Song, ref.Singer)
+			mcancel()
+			if err == nil && strings.TrimSpace(text) != "" {
+				return text
+			}
+			if err != nil {
+				s.noteMeowError(err)
+				// 超时是预期内的降级路径（Meow 冷启动常年超出 3 秒预算，
+				// 后续会落到网易云并通常能拿到词），打成"失败"会让排障的人误判。
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					log.Printf("[lyrics] Meow 取词超出 %s 预算，转网易云兜底 song=%q", step, ref.Song)
+				} else {
+					log.Printf("[lyrics] Meow 取词失败 song=%q: %v", ref.Song, err)
+				}
 			}
 		}
 	} else if !lyricSourceAllowed(ref.Source) {
@@ -203,30 +221,51 @@ func (s *Server) coverCandidates(ctx context.Context, ref MeowRef, wait time.Dur
 	return []string{info.Cover}
 }
 
-// warmCovers 在搜索返回后后台预热封面。
+// coverWarmBudget 是搜索返回前愿意为"补全"多等的时间。
 //
-// 目的是让用户滚到列表时封面已经在缓存里：否则每一格的第一次请求都得先
-// 等一次外网检索，列表会先铺满 LOGO 再逐个换图，观感上就是"一直没有海报"。
-// Get 的 wait=0 只触发后台解析、立即返回，所以这里不需要另开 goroutine 池，
-// 真正的并发限流在 resolver 内部。
-func (s *Server) warmCovers(tracks []MeowTrack) {
+// 值得等：专辑名与封面都靠这次预热填。完全不等的代价是列表页"专辑"列恒为空、
+// 首屏先铺满 LOGO 再逐格换图。350ms 覆盖不了全部 12 首（并发限流 4 路），
+// 但足够把最前面几首——也就是首屏——填上，剩下的在后台继续解析。
+const coverWarmBudget = 350 * time.Millisecond
+
+// warmCoversWait 预热封面，并在 budget 内等待结果落进缓存。
+//
+// budget<=0 表示只触发后台解析、立即返回。等待是按总预算控制的：
+// 所有探测共用一个带超时的 ctx，到点就一起放行，不会一首一首累加。
+// 注意 resolver 内部抓取用的是独立的 background ctx，所以超时只是
+// "这次没等到"，抓到的结果仍会写进缓存，下次搜索就命中。
+func (s *Server) warmCoversWait(tracks []MeowTrack, budget time.Duration) {
 	if !s.Config().MetaEnabled {
 		return
 	}
+	ctx := context.Background()
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	const maxWarm = 12
-	warmed := 0
+	var wg sync.WaitGroup
+	n := 0
 	for _, t := range tracks {
-		if warmed >= maxWarm {
+		if n >= maxWarm {
 			break
 		}
 		if t.Source == youtubeSourceKey || strings.TrimSpace(t.Title) == "" {
 			continue
 		}
-		warmed++
+		n++
 		ref := trackToRef(t)
-		s.metaLookup(context.Background(), ref, 0)
+		wg.Add(1)
+		// 显式传参而不是闭包捕获：go.mod 是 1.21，循环变量还是共享的。
+		go func(ref MeowRef) {
+			defer wg.Done()
+			s.metaLookup(ctx, ref, budget)
+		}(ref)
 	}
-	if warmed > 0 {
-		log.Printf("[cover] 预热 %d 首曲目的封面", warmed)
+	if n == 0 {
+		return
 	}
+	wg.Wait()
+	log.Printf("[cover] 预热 %d 首曲目的封面与专辑（等待上限 %s）", n, budget)
 }

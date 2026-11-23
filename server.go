@@ -34,6 +34,11 @@ type Server struct {
 	// meta 负责给在线曲目补封面与歌词（网易云公开接口）。
 	// 与 cfg 无关地常驻：配置只决定用不用它，不决定要不要重建缓存。
 	meta *metaResolver
+	// searchCache 缓存在线搜索结果。前端"输入即搜"，每个字都打一轮外网
+	// 既慢又容易把上游打出限流，缓存能把一次输入的多轮请求压成一轮。
+	searchCache *searchCache
+	// meowCooldown 在 Meow 报 429/403 后短期跳过它，不再为已知结论反复往返。
+	meowCooldown *meowCooldown
 
 	startedAt time.Time
 }
@@ -54,8 +59,10 @@ func NewServer(cfg Config, cfgPath string) *Server {
 				TLSHandshakeTimeout: 8 * time.Second,
 			},
 		},
-		meta:      newMetaResolver(),
-		startedAt: time.Now(),
+		meta:         newMetaResolver(),
+		searchCache:  newSearchCache(),
+		meowCooldown: &meowCooldown{},
+		startedAt:    time.Now(),
 	}
 	if err := s.guids.Load(); err != nil {
 		log.Printf("[init] 读取 id 映射失败（不影响启动）：%v", err)
@@ -203,6 +210,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"ok":    cfg.OnlineEnabled && meowErrText == "",
 			"url":   cfg.MeowURL,
 			"error": meowErrText,
+			// 额度用尽后扩展会主动冷一段时间，这里把剩余时间报出来，
+			// 免得排障时看到"搜索没有 Meow 结果"却以为线路断了。
+			"cooldown_s": int(s.meowCooldown.remaining().Seconds()),
 		},
 		"youtube": map[string]any{
 			"configured": ytConfigured,
@@ -210,8 +220,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"url":        cfg.YoutubeAPIURL,
 			"error":      ytErrText,
 		},
-		"online":   cfg.OnlineEnabled,
-		"guid_map": s.guids.Size(),
+		"online":       cfg.OnlineEnabled,
+		"guid_map":     s.guids.Size(),
+		"search_cache": s.searchCache.size(),
 	})
 }
 
