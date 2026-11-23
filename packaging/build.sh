@@ -62,21 +62,15 @@ for arch in ${PLATFORMS}; do
     log "$(du -h "${bin}" | cut -f1) ${bin}"
 
     stage="${OUT}/stage-${arch}"
-    mkdir -p "${stage}/config" "${stage}/cmd" "${stage}/wizard" \
-             "${stage}/app/ui/images" "${stage}/app/bin" "${stage}/app/systemd"
+    mkdir -p "${stage}/config" "${stage}/cmd" "${stage}/wizard" "${stage}/app"
 
-    # manifest 里的 platform 决定应用中心允许在哪些 CPU 上安装。
-    sed -e "s/@VERSION@/${VERSION}/g" -e "s/@PLATFORM@/$(platform_of "${arch}")/g" \
-        packaging/fpk/manifest.in > "${stage}/manifest"
-    cp packaging/fpk/ICON.PNG packaging/fpk/ICON_256.PNG "${stage}/"
-    cp -a packaging/fpk/config/. "${stage}/config/"
-    cp -a packaging/fpk/cmd/. "${stage}/cmd/"
-    cp -a packaging/fpk/wizard/. "${stage}/wizard/"
+    # ---- 1. 组装应用主体（将来打成 app.tgz，解压到 TRIM_APPDEST）----
+    # 布局：app/bin/meow-ext、app/ui/、app/systemd/
+    # 解压后即 target/bin/meow-ext，与 manifest 的 desktop_uidir="ui" 对应。
+    mkdir -p "${stage}/app/ui/images" "${stage}/app/bin" "${stage}/app/systemd"
     cp -a packaging/fpk/app/ui/. "${stage}/app/ui/"
     cp "${bin}" "${stage}/app/bin/meow-ext"
     chmod 0755 "${stage}/app/bin/meow-ext"
-    # 生命周期脚本必须可执行，否则应用中心会静默跳过它们。
-    chmod 0755 "${stage}/cmd/"* 2>/dev/null || true
     cp packaging/systemd/meow-ext.service.in "${stage}/app/systemd/"
 
     # 桌面图标两档尺寸由飞牛桌面按需取用。
@@ -86,6 +80,35 @@ for arch in ${PLATFORMS}; do
     else
         log "警告：缺少 app/ui/images 图标，桌面图标会显示为空白"
     fi
+
+    # ---- 2. 打成 app.tgz ----
+    # 这是飞牛 FPK 的硬性约定：应用主体必须是包内顶层的一个 app.tgz，
+    # 缺了它应用中心会直接报 ErrCodePackageException（"应用包不符合系统要求"）。
+    # 用 -C app . 让归档内顶层就是 bin/ ui/ systemd/，解压后直接落在 target/ 下。
+    tar czf "${stage}/app.tgz" -C "${stage}/app" .
+    rm -rf "${stage}/app"
+
+    # ---- 3. manifest（checksum 必须是 app.tgz 的 md5，构建期算完注入）----
+    # 校验和是安装前的第一道关：对不上就说明包坏了或被人改过，应用中心会拒装。
+    checksum="$(md5sum "${stage}/app.tgz" | cut -d' ' -f1)"
+    sed -e "s/@VERSION@/${VERSION}/g" \
+        -e "s/@PLATFORM@/$(platform_of "${arch}")/g" \
+        -e "s/@CHECKSUM@/${checksum}/g" \
+        packaging/fpk/manifest.in > "${stage}/manifest"
+    cp packaging/fpk/ICON.PNG packaging/fpk/ICON_256.PNG "${stage}/"
+    cp -a packaging/fpk/config/. "${stage}/config/"
+    cp -a packaging/fpk/cmd/. "${stage}/cmd/"
+    cp -a packaging/fpk/wizard/. "${stage}/wizard/"
+    # 生命周期脚本必须可执行，否则应用中心会静默跳过它们。
+    chmod 0755 "${stage}/cmd/"* 2>/dev/null || true
+
+    # ---- 4. 打包前自检：这几项缺任何一项都会被应用中心拒装 ----
+    for _need in manifest app.tgz ICON.PNG ICON_256.PNG cmd/main config/privilege; do
+        [ -e "${stage}/${_need}" ] || die "FPK 结构不完整，缺少 ${_need}"
+    done
+    _sz=$(wc -c < "${stage}/app.tgz")
+    # app.tgz 过小说明打包中断（真实应用至少几百 KB）。
+    [ "${_sz}" -gt 10240 ] || die "app.tgz 只有 ${_sz} 字节，明显不完整"
 
     pkg="${OUT}/meow-ext-${VERSION}-${arch}.fpk"
     rm -f "${pkg}"

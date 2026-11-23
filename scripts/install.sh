@@ -75,7 +75,7 @@ SRC_BIN=""
 for cand in "${PWD}/dist/bin/meow-ext-${GOARCH}" "${PWD}/meow-ext" "${BIN_DIR}/meow-ext"; do
     if [ -x "${cand}" ]; then SRC_BIN="${cand}"; break; fi
 done
-[ -n "${SRC_BIN}" ] || die "找不到可执行文件。请先运行 packaging/build.sh，或从 FPK 中取出 app/bin/meow-ext"
+[ -n "${SRC_BIN}" ] || die "找不到可执行文件。请先运行 packaging/build.sh，或解开 FPK 里的 app.tgz 取 bin/meow-ext"
 
 mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${DATA_DIR}" "${STATE_DIR}"
 # 覆盖前先停服务：运行中的二进制被替换会导致进程映像与文件不一致。

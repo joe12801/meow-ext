@@ -4,12 +4,17 @@
 
 MEOW_APP_ROOT="$(cd "${SELF_DIR}/.." && pwd)"
 
-# 二进制位置：不同 fnOS 版本把应用文件落在不同层级，依次探测。
+# TRIM_APPDEST 是飞牛给的应用文件目录，即注册目录下的 target（app.tgz 解压处）。
+# 个别环境下它不被注入，此时退回注册目录下的 target 软链。
+# 注意不能用 "${TRIM_APPDEST:-}/bin/..."：变量为空会拼成 /bin/meow-ext。
+MEOW_APPDEST="${TRIM_APPDEST:-${MEOW_APP_ROOT}/target}"
+
+# 二进制位置：app.tgz 解压后顶层就是 bin/；同时兼容早先平铺的 app/bin 布局。
 MEOW_BIN=""
 for _cand in \
-    "${TRIM_APPDEST:-}/app/bin/meow-ext" \
-    "${MEOW_APP_ROOT}/app/bin/meow-ext" \
-    "${MEOW_APP_ROOT}/target/app/bin/meow-ext"
+    "${MEOW_APPDEST}/bin/meow-ext" \
+    "${MEOW_APPDEST}/app/bin/meow-ext" \
+    "${MEOW_APP_ROOT}/app/bin/meow-ext"
 do
     if [ -n "${_cand}" ] && [ -x "${_cand}" ]; then
         MEOW_BIN="${_cand}"
@@ -23,7 +28,7 @@ MEOW_PKGVAR="${TRIM_PKGVAR:-${MEOW_APP_ROOT}/data}"
 MEOW_CONFIG="${MEOW_PKGVAR}/config.json"
 MEOW_DATA="${MEOW_PKGVAR}/data"
 MEOW_STATE="/run/meow-ext"
-MEOW_GATEWAY_SOCK="${TRIM_APPDEST:-${MEOW_APP_ROOT}}/meow-ext.sock"
+MEOW_GATEWAY_SOCK="${MEOW_APPDEST}/meow-ext.sock"
 MEOW_UNIT="/etc/systemd/system/meow-ext.service"
 MEOW_LOG="${MEOW_PKGVAR}/app.log"
 
@@ -46,11 +51,13 @@ meow_note() {
 # render_unit 把模板里的占位符换成实际路径并落盘。
 # 路径里若含反斜杠、引号、% 等字符，systemd 会把整行解释错，直接拒绝而不是硬写。
 render_unit() {
-    local tpl="${MEOW_APP_ROOT}/app/systemd/meow-ext.service.in"
+    # 模板随 app.tgz 落在 target/systemd/ 下；兼容两种历史布局。
+    local tpl="${MEOW_APPDEST}/systemd/meow-ext.service.in"
+    [ -f "${tpl}" ] || tpl="${MEOW_APP_ROOT}/app/systemd/meow-ext.service.in"
     [ -f "${tpl}" ] || tpl="${MEOW_APP_ROOT}/systemd/meow-ext.service.in"
     [ -f "${tpl}" ] || meow_fail "缺少 systemd 模板（meow-ext.service.in），请重新安装"
 
-    local root="${TRIM_APPDEST:-${MEOW_APP_ROOT}}"
+    local root="${MEOW_APPDEST}"
     if printf '%s' "${root}" | grep -q '[[:cntrl:]"\\%$]'; then
         meow_fail "应用安装路径含 systemd 不支持的字符：${root}"
     fi

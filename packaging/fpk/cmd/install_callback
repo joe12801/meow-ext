@@ -29,6 +29,16 @@ fi
 render_unit || meow_fail "写入 systemd unit 失败"
 meow_note "已安装 ${MEOW_UNIT}"
 
+# 2.5 已有同名服务在跑时必须先停：很常见的情况是先用命令行方式装过、现在改用
+# 应用中心安装。此时旧进程仍占着入口、用的还是旧路径的二进制，而
+# `systemctl enable --now` 对运行中的服务是 no-op —— 不停就是"装完等于没装"。
+# 另外自检也会把旧实例误判成"入口被别的程序占用"。
+if systemctl is-active --quiet meow-ext.service 2>/dev/null; then
+    meow_note "检测到同名服务正在运行，先停止以便切换到本包内的二进制"
+    systemctl stop meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+    sleep 1
+fi
+
 # 3. 自检。Meow 不可达只提示不阻断——先装好、再去配地址是常见流程。
 check_out="$("${MEOW_BIN}" check --config "${MEOW_CONFIG}" 2>&1)"
 printf '%s\n' "${check_out}" >> "${MEOW_LOG}"
