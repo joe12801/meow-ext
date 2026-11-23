@@ -152,10 +152,10 @@ func TestSearchMergesOfficialAndOnline(t *testing.T) {
 	if body.Data.List[0].GUID != "aaaa1111" {
 		t.Fatalf("官方条目应排首位，实际 %+v", body.Data.List[0])
 	}
-	// 在线条目要带来源标记且 id 已伪装。
+	// 在线条目 id 要伪装；标题不加来源前缀（来源由封面 LOGO 表达）。
 	online := body.Data.List[1]
-	if !strings.HasPrefix(online.Title, sourceTagMeow) {
-		t.Fatalf("在线条目缺来源标记：%q", online.Title)
+	if online.Title != "夜曲" {
+		t.Fatalf("在线条目标题应保持干净：%q", online.Title)
 	}
 	if len(online.GUID) != 32 {
 		t.Fatalf("在线 id 未伪装成 32-hex：%q", online.GUID)

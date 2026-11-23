@@ -13,11 +13,6 @@ import (
 	"time"
 )
 
-// 搜索结果里在线条目的来源标记。只出现在搜索结果列表的标题上，
-// 目的是让用户一眼看出"这条不是本地曲库"。收藏、历史、歌词等出口一律用
-// 干净标题，业务逻辑永远不吃这个标记。
-const sourceTagMeow = "[meow] "
-
 // TrackVO 是下发给飞牛客户端的曲目结构。
 //
 // 字段冗余到近乎啰嗦，这是刻意的：飞牛 Web 与 App 是两套前端，解构同一个
@@ -98,6 +93,9 @@ func buildTrackVO(meowID, fakeID string, t MeowTrack) TrackVO {
 	// audioSpec.path 必须是个像文件名的东西：客户端会拿它判断格式、
 	// 也会拼进缓存路径。用 id 的哈希保证稳定且不含斜杠——
 	// 带斜杠会被飞牛 1.1.19 误认为可在文件夹视图里定位的真实目录。
+	//
+	// 标题保持干净：以前在标题前加 "[meow] " 当来源标记，既难看又占宽度，
+	// 现在来源改由封面位上的音源 LOGO 表达（见 cover_logo.go）。
 	sum := sha256.Sum256([]byte(meowID))
 	specName := hex.EncodeToString(sum[:]) + ".mp3"
 
@@ -117,8 +115,8 @@ func buildTrackVO(meowID, fakeID string, t MeowTrack) TrackVO {
 		ID:   fakeID,
 		// 来源标记只在搜索结果里出现，因此这里直接带上；
 		// 若日后要给"收藏列表"复用这个构造，需按出口区分。
-		Title:   sourceTagMeow + title,
-		Name:    sourceTagMeow + title,
+		Title:   title,
+		Name:    title,
 		Artist:  artist,
 		Artists: artists,
 		Album: AlbumVO{

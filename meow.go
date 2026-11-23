@@ -323,9 +323,10 @@ func (c *MeowClient) Health(ctx context.Context) error {
 // 原样存下来，播放时直接请求。
 func trackToRef(t MeowTrack) MeowRef {
 	ref := MeowRef{
-		Song:   strings.TrimSpace(t.Title),
-		Singer: strings.TrimSpace(t.Artist),
-		Source: strings.TrimSpace(t.Source),
+		Song:     strings.TrimSpace(t.Title),
+		Singer:   strings.TrimSpace(t.Artist),
+		Source:   strings.TrimSpace(t.Source),
+		Duration: t.Duration,
 	}
 	raw := strings.TrimSpace(t.URL)
 	if raw == "" {

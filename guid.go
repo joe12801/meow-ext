@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -37,12 +38,25 @@ type MeowRef struct {
 	// （外部源的 /api/ext_audio?… 带签名参数，拆不开也不该拆）。
 	// 非空时优先于 Song/Singer/XID/BV 拼出来的地址。
 	Path string `json:"path,omitempty"`
+	// Duration 是搜索时拿到的时长（秒）。
+	//
+	// 放在 id 里而不是另开一张表，是因为它只在播放前那次 metadata 请求里用得上；
+	// 为它多维护一份持久化映射（还要跟 guid 映射同步淘汰）不值得。
+	// 0 表示上游没给，播放器会以文件实际时长为准。
+	Duration int `json:"duration,omitempty"`
 }
 
 // EncodeGUID 把取流信息编码成 online:meow:<base64url>。
 // base64url 不含 ':' 与 '/'，因此可以安全地出现在 URL 路径与查询串里。
 func EncodeGUID(ref MeowRef) string {
 	fields := []string{ref.Song, ref.Singer, ref.XID, ref.BV, ref.Source, ref.Path}
+	// 时长单独拼在最后，0 用空串占位，这样"没时长"的老 id 与新 id 能共存：
+	// 老注册表里的 id 只有 6 段，解码时缺位就是 0。
+	dur := ""
+	if ref.Duration > 0 {
+		dur = strconv.Itoa(ref.Duration)
+	}
+	fields = append(fields, dur)
 	// 从尾部裁掉空字段，能让常见情况（只有歌名+歌手）的 id 短一截。
 	// 中间的字段即使为空也保留：位置就是语义，空串代表"没有这一项"。
 	for len(fields) > 2 && fields[len(fields)-1] == "" {
@@ -82,6 +96,11 @@ func DecodeGUID(guid string) (MeowRef, bool) {
 	}
 	if len(fields) > 5 {
 		ref.Path = fields[5]
+	}
+	if len(fields) > 6 {
+		if n, err := strconv.Atoi(fields[6]); err == nil && n > 0 {
+			ref.Duration = n
+		}
 	}
 	if strings.TrimSpace(ref.Song) == "" {
 		return MeowRef{}, false

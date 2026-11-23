@@ -108,6 +108,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	case path == "/music/api/v1/track/stream" || strings.HasPrefix(path, "/music/api/v1/track/stream/"):
 		s.handleStream(w, r, tailSegment(path, "/music/api/v1/track/stream/"))
 		return
+	// 播放前的元数据。缺了它客户端会把这次播放判成"播放源不存在"，
+	// 连取流请求都不会发出来——表现就是"搜得到、点了没声"。
+	case path == "/music/api/v1/track/metadata" || strings.HasPrefix(path, "/music/api/v1/track/metadata/"):
+		s.handleTrackMetadata(w, r)
+		return
 	case path == "/music/api/v1/track/lyrics" || strings.HasPrefix(path, "/music/api/v1/track/lyrics/"):
 		s.handleLyrics(w, r, tailSegment(path, "/music/api/v1/track/lyrics/"))
 		return

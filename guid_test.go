@@ -14,6 +14,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}{
 		{"只有歌名歌手", MeowRef{Song: "晴天", Singer: "周杰伦"}},
 		{"带来源", MeowRef{Song: "晴天", Singer: "周杰伦", Source: "kuwo"}},
+		{"带时长", MeowRef{Song: "夜曲", Singer: "周杰伦", Source: "kuwo", Duration: 260}},
 		{"喜马拉雅 xid", MeowRef{Song: "三体", Singer: "广播剧", XID: "123456", Source: "ximalaya"}},
 		{"B 站 bv", MeowRef{Song: "晴天", Singer: "UP主", BV: "BV1BZbSzZEGT", Source: "bilibili"}},
 		{

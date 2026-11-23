@@ -67,8 +67,9 @@ func TestMergeOnlineProducesFakeHexGUID(t *testing.T) {
 	if vo.ID != vo.GUID {
 		t.Fatalf("id 与 guid 必须一致（客户端两种键名都用），got id=%q guid=%q", vo.ID, vo.GUID)
 	}
-	if !strings.HasPrefix(vo.Title, sourceTagMeow) {
-		t.Fatalf("搜索结果应带来源标记，实际 %q", vo.Title)
+	// 标题保持干净：来源标识改由封面位上的音源 LOGO 承担。
+	if vo.Title != "夜曲" {
+		t.Fatalf("标题应原样下发、不加来源前缀，实际 %q", vo.Title)
 	}
 	if !vo.IsOnline || vo.Source != "meow" {
 		t.Fatalf("在线条目标记缺失：%+v", vo)

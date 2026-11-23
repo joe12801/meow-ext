@@ -172,7 +172,18 @@ func (s *Server) handleCover(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 有真实封面地址就代理它；没有则看是不是我们下发的伪 coverId。
+	//
+	// 官方 /static/cover 只认自己库里的 coverId，我们的伪 id 在那边一律 400，
+	// 列表里就只剩灰色音符占位图。在线曲目本来也拿不到真实封面
+	// （Meow 的搜索结果 cover_url 为空），正好用这个位置显示音源标识。
 	if coverURL == "" || !(strings.HasPrefix(coverURL, "http://") || strings.HasPrefix(coverURL, "https://")) {
+		if id := coverIDParam(r); id != "" {
+			if source, ok := s.sourceOfCoverID(id); ok {
+				serveSourceLogo(w, r, source)
+				return
+			}
+		}
 		s.upstream.ServeHTTP(w, r)
 		return
 	}
