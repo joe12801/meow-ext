@@ -120,13 +120,13 @@ func TestCoverStripsCategoryPrefixes(t *testing.T) {
 
 func TestNormalizeSourceFallsBackToMeow(t *testing.T) {
 	cases := map[string]string{
-		"kuwo":         "kuwo",
-		"NetEase":      "netease",
-		"bili":         "bilibili",
-		"5sing":        "fivesing",
-		"unknown-src":  "meow",
-		"":             "meow",
-		"qqmusic":      "qq",
+		"kuwo":        "kuwo",
+		"NetEase":     "netease",
+		"bili":        "bilibili",
+		"5sing":       "fivesing",
+		"unknown-src": "meow",
+		"":            "meow",
+		"qqmusic":     "qq",
 	}
 	for in, want := range cases {
 		if got := normalizeSource(in); got != want {

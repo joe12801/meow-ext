@@ -29,6 +29,8 @@ LOGOS = {
     "bilibili": ("bili", "#FB7299"),
     "qishui":   ("汽水", "#0DD3C5"),
     "ext":      ("扩展", "#7A5AF8"),
+    # YouTube 红：#FF0033 太刺眼，用官方的 #FF0000 略压暗一档，40px 下更稳
+    "youtube":  ("YT",   "#E62117"),
     # 兜底：来源未知时用它，免得回到灰色音符占位图
     "meow":     ("Meow", "#6C5CE7"),
 }

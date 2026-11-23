@@ -172,6 +172,37 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2>YouTube（可选）</h2>
+    <div class="hint" style="margin-bottom:12px">
+      Meow 不支持 YouTube，这里接的是独立的「YouTube → MP3」转换服务（yt-dlp + ffmpeg）。
+      填地址并勾选上面的 YouTube 音源才会生效。
+    </div>
+    <label class="field">
+      <span>mp3api 地址<span class="hint">含 http:// 或 https://，如 https://mp3.example.com</span></span>
+      <input type="text" id="ytUrl" placeholder="https://mp3.example.com" spellcheck="false">
+    </label>
+    <label class="field">
+      <span>API Key<span class="hint" id="ytKeyHint">服务端未开鉴权时留空</span></span>
+      <input type="password" id="ytKey" placeholder="留空表示不修改" autocomplete="new-password">
+    </label>
+    <div class="grid2">
+      <label class="field">
+        <span>转码码率（kbps）</span>
+        <select id="ytBitrate">
+          <option value="128">128</option>
+          <option value="192">192</option>
+          <option value="256">256</option>
+          <option value="320">320</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>最长时长（秒）<span class="hint">0 = 不过滤</span></span>
+        <input type="number" id="ytMaxDuration" min="0" max="36000">
+      </label>
+    </div>
+  </div>
+
   <div class="row" style="justify-content:flex-end">
     <button class="primary" id="btnSave">保存配置</button>
   </div>
@@ -186,7 +217,7 @@
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { sources: [], chosen: new Set(), tokenSet: false };
+  const state = { sources: [], chosen: new Set(), tokenSet: false, ytKeySet: false };
 
   const toast = (msg, bad) => {
     const el = $('toast');
@@ -226,6 +257,13 @@
       const online = s.online ? (s.meow.ok ? 'ok' : 'bad') : 'off';
       row.appendChild(pill(s.online ? (s.meow.ok ? 'Meow 已连接' : 'Meow 未连接') : '在线搜索已关闭', online, s.meow.url));
       if (s.online && s.meow.ok) row.appendChild(pill('已映射 ' + s.guid_map + ' 首', ''));
+      if (s.youtube && s.youtube.selected) {
+        row.appendChild(pill(
+          s.youtube.configured ? 'YouTube 已接入' : 'YouTube 未填地址',
+          s.youtube.configured ? 'ok' : 'bad',
+          s.youtube.configured ? '' : '在下方填写 mp3api 地址后才能搜到 YouTube'
+        ));
+      }
       const errs = [];
       if (s.upstream.error) errs.push('官方：' + s.upstream.error);
       if (s.meow.error) errs.push('Meow：' + s.meow.error);
@@ -289,6 +327,12 @@
     $('searchLimit').value = cfg.search_limit || 30;
     $('searchTimeout').value = cfg.search_timeout_s || 5;
     $('onlineEnabled').checked = !!cfg.online_enabled;
+    state.ytKeySet = !!cfg.youtube_key_set;
+    $('ytUrl').value = cfg.youtube_api_url || '';
+    $('ytKey').value = '';
+    $('ytKeyHint').textContent = state.ytKeySet ? '已设置，留空则不修改' : '服务端未开鉴权时留空';
+    $('ytBitrate').value = String(cfg.youtube_bitrate || 192);
+    $('ytMaxDuration').value = (cfg.youtube_max_duration_s === undefined ? 900 : cfg.youtube_max_duration_s);
     renderSources();
   }
 
@@ -323,6 +367,30 @@
           });
           out.appendChild(ul);
         }
+        if (r.youtube) {
+          const y = document.createElement('div');
+          y.style.marginTop = '8px';
+          if (r.youtube.ok) {
+            y.textContent = 'YouTube 正常，搜索「' + r.query + '」返回 ' + r.youtube.count + ' 条'
+              + (r.youtube.warning ? ' — ' + r.youtube.warning : '');
+            if (r.youtube.samples && r.youtube.samples.length) {
+              const ul2 = document.createElement('ul');
+              r.youtube.samples.forEach((s2) => {
+                const li = document.createElement('li');
+                li.textContent = s2.title + ' — ' + (s2.artist || '未知') + ' · ' + s2.duration + 's';
+                ul2.appendChild(li);
+              });
+              out.appendChild(y);
+              out.appendChild(ul2);
+            } else {
+              out.appendChild(y);
+            }
+          } else {
+            y.className = 'err';
+            y.textContent = 'YouTube：' + (r.youtube.error || '测试失败') + '（' + (r.youtube.url || '') + '）';
+            out.appendChild(y);
+          }
+        }
       }
     } catch (e) {
       $('testOut').textContent = '';
@@ -343,10 +411,15 @@
       sources: Array.from(state.chosen),
       search_limit: parseInt($('searchLimit').value, 10) || 30,
       search_timeout_s: parseInt($('searchTimeout').value, 10) || 5,
-      online_enabled: $('onlineEnabled').checked
+      online_enabled: $('onlineEnabled').checked,
+      youtube_api_url: $('ytUrl').value.trim(),
+      youtube_bitrate: parseInt($('ytBitrate').value, 10) || 192,
+      youtube_max_duration_s: ($('ytMaxDuration').value === '' ? 0 : parseInt($('ytMaxDuration').value, 10))
     };
     const token = $('meowToken').value.trim();
     if (token) payload.meow_token = token;
+    const ytKey = $('ytKey').value.trim();
+    if (ytKey) payload.youtube_api_key = ytKey;
     try {
       const r = await api('api/config', {
         method: 'POST',

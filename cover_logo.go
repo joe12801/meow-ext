@@ -41,7 +41,8 @@ var logoAliases = map[string]string{
 // logoKeys 与 assets/logos 下的文件名保持一致。
 var logoKeys = map[string]struct{}{
 	"kuwo": {}, "netease": {}, "kugou": {}, "qq": {}, "ximalaya": {},
-	"fivesing": {}, "lizhi": {}, "bilibili": {}, "qishui": {}, "ext": {}, "meow": {},
+	"fivesing": {}, "lizhi": {}, "bilibili": {}, "qishui": {}, "ext": {},
+	"youtube": {}, "meow": {},
 }
 
 // coverIDParam 取封面 id。飞牛有两种传法：查询参数 coverId=，

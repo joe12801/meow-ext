@@ -27,6 +27,7 @@ type Server struct {
 	cfg      Config
 	cfgPath  string
 	meow     *MeowClient
+	youtube  *YouTubeClient
 	guids    *GUIDRegistry
 	upstream *Upstream
 	images   *http.Client
@@ -39,6 +40,7 @@ func NewServer(cfg Config, cfgPath string) *Server {
 		cfg:      cfg,
 		cfgPath:  cfgPath,
 		meow:     NewMeowClient(cfg),
+		youtube:  NewYouTubeClient(cfg),
 		guids:    NewGUIDRegistry(cfg.DataDir + "/guid-map.json"),
 		upstream: NewUpstream(cfg.UpstreamSocket),
 		images: &http.Client{
@@ -70,6 +72,13 @@ func (s *Server) meowClient() *MeowClient {
 	return s.meow
 }
 
+// youtubeClient 可能返回 nil（未配置 mp3api 地址），调用方必须判空。
+func (s *Server) youtubeClient() *YouTubeClient {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.youtube
+}
+
 // ApplyConfig 热更新配置并落盘。
 func (s *Server) ApplyConfig(cfg Config) error {
 	if err := cfg.Validate(); err != nil {
@@ -83,6 +92,7 @@ func (s *Server) ApplyConfig(cfg Config) error {
 	s.mu.Lock()
 	s.cfg = cfg
 	s.meow = NewMeowClient(cfg)
+	s.youtube = NewYouTubeClient(cfg)
 	s.mu.Unlock()
 	return nil
 }
@@ -159,6 +169,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// YouTube 是可选源：未配置时给 ok:false + configured:false，
+	// 别让健康检查把它当成故障。
+	ytErrText := ""
+	yt := s.youtubeClient()
+	ytConfigured := yt != nil
+	if ytConfigured && cfg.OnlineEnabled {
+		ctx, cancel := timeoutCtx(r, 3*time.Second)
+		defer cancel()
+		if err := yt.Health(ctx); err != nil {
+			ytErrText = err.Error()
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       upErr == nil,
 		"version":  Version,
@@ -172,6 +195,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"ok":    cfg.OnlineEnabled && meowErrText == "",
 			"url":   cfg.MeowURL,
 			"error": meowErrText,
+		},
+		"youtube": map[string]any{
+			"configured": ytConfigured,
+			"ok":         ytConfigured && cfg.OnlineEnabled && ytErrText == "",
+			"url":        cfg.YoutubeAPIURL,
+			"error":      ytErrText,
 		},
 		"online":   cfg.OnlineEnabled,
 		"guid_map": s.guids.Size(),

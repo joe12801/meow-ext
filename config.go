@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -44,6 +45,23 @@ type Config struct {
 	// 冷启动几十秒是常态，之后才走缓存。这里偏保守地给 300 秒。
 	StreamTimeout int `json:"stream_timeout_s"`
 	LyricTimeout  int `json:"lyric_timeout_s"`
+
+	// ---- YouTube（自建 mp3api，非 Meow 内置源）----
+	//
+	// Meow 本身不支持 YouTube，这里接的是"YouTube 链接 → MP3"的转换服务
+	// （yt-dlp + ffmpeg，/api/search|resolve|music|lyrics）。地址留空 = 不启用，
+	// 此时 sources 里即使勾了 youtube 也会被忽略，不会拖慢其他音源的搜索。
+	YoutubeAPIURL string `json:"youtube_api_url"`
+	// YoutubeAPIKey 走 X-API-Key 头。空表示服务端没开鉴权。
+	YoutubeAPIKey string `json:"youtube_api_key"`
+	// YoutubeBitrate 是转 MP3 的目标码率（kbps），服务端允许 64~320，默认 192。
+	// 码率也是缓存键的一部分：改了会重新下载一遍。
+	YoutubeBitrate int `json:"youtube_bitrate"`
+	// YoutubeMaxDuration 过滤搜索结果里过长的视频（秒），0 表示不过滤。
+	// YouTube 搜歌回来的常是几十分钟的合集/MV，播起来体验很差；
+	// 服务端自己也有下载时长上限（默认 900 秒），超了会直接失败，
+	// 所以在搜索阶段就挡掉，别让用户点了才看到错误。
+	YoutubeMaxDuration int `json:"youtube_max_duration_s"`
 
 	// ---- 路径 ----
 	// UpstreamSocket 是官方音乐的原始 socket，接管时会被移到这里。
@@ -86,6 +104,8 @@ func DefaultConfig() Config {
 		GatewaySocket:      DefaultGatewaySocket,
 		StateDir:           DefaultStateDir,
 		DataDir:            DefaultDataDir,
+		YoutubeBitrate:     192,
+		YoutubeMaxDuration: 900,
 	}
 }
 
@@ -136,6 +156,13 @@ func applyEnv(cfg *Config) {
 	setStr("MEOW_EXT_GATEWAY_SOCKET", &cfg.GatewaySocket)
 	setStr("MEOW_EXT_STATE_DIR", &cfg.StateDir)
 	setStr("MEOW_EXT_DATA_DIR", &cfg.DataDir)
+	setStr("MEOW_EXT_YOUTUBE_URL", &cfg.YoutubeAPIURL)
+	setStr("MEOW_EXT_YOUTUBE_KEY", &cfg.YoutubeAPIKey)
+	if v := strings.TrimSpace(os.Getenv("MEOW_EXT_YOUTUBE_BITRATE")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.YoutubeBitrate = n
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv("MEOW_EXT_SOURCES")); v != "" {
 		cfg.Sources = splitList(v)
 	}
@@ -206,6 +233,28 @@ func (c *Config) Validate() error {
 	}
 	if c.DataDir == "" {
 		c.DataDir = DefaultDataDir
+	}
+	// YouTube 是可选增强：地址留空就整体关闭，不必报错。
+	c.YoutubeAPIURL = strings.TrimRight(strings.TrimSpace(c.YoutubeAPIURL), "/")
+	if c.YoutubeAPIURL != "" {
+		u, err := url.Parse(c.YoutubeAPIURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("youtube_api_url 必须是完整地址（含 http:// 或 https://），当前为 %q", c.YoutubeAPIURL)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("youtube_api_url 的协议只支持 http/https，当前为 %q", u.Scheme)
+		}
+	}
+	switch c.YoutubeBitrate {
+	case 0:
+		c.YoutubeBitrate = 192
+	case 64, 96, 128, 192, 256, 320:
+	default:
+		// 服务端只认这几档，别的值会被它拒掉，别让用户存进去之后才发现。
+		return fmt.Errorf("youtube_bitrate 只支持 64/96/128/192/256/320，当前为 %d", c.YoutubeBitrate)
+	}
+	if c.YoutubeMaxDuration < 0 {
+		c.YoutubeMaxDuration = 0
 	}
 	return nil
 }

@@ -35,6 +35,7 @@ var knownSources = []knownSource{
 	{Key: "lizhi", Label: "荔枝 FM", Note: "上游解析不稳定"},
 	{Key: "bilibili", Label: "哔哩哔哩"},
 	{Key: "qishui", Label: "汽水音乐"},
+	{Key: "youtube", Label: "YouTube", Note: "需在下方填写 mp3api 地址；由扩展直连，不走 Meow"},
 	{Key: "ext", Label: "扩展源", Note: "需在 Meow 侧另行配置"},
 }
 
@@ -96,24 +97,33 @@ type configView struct {
 	LyricTimeout   int      `json:"lyric_timeout_s"`
 	TargetSocket   string   `json:"target_socket"`
 	UpstreamSocket string   `json:"upstream_socket"`
-	Version        string   `json:"version"`
+	// YouTube 相关：Key 同样只回传"是否已设置"。
+	YoutubeAPIURL      string `json:"youtube_api_url"`
+	YoutubeKeySet      bool   `json:"youtube_key_set"`
+	YoutubeBitrate     int    `json:"youtube_bitrate"`
+	YoutubeMaxDuration int    `json:"youtube_max_duration_s"`
+	Version            string `json:"version"`
 }
 
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		cfg := s.Config()
 		writeJSON(w, http.StatusOK, configView{
-			MeowURL:        cfg.MeowURL,
-			TokenSet:       cfg.MeowToken != "",
-			Sources:        cfg.Sources,
-			SearchLimit:    cfg.SearchLimit,
-			OnlineEnabled:  cfg.OnlineEnabled,
-			SearchTimeout:  cfg.SearchTimeout,
-			StreamTimeout:  cfg.StreamTimeout,
-			LyricTimeout:   cfg.LyricTimeout,
-			TargetSocket:   cfg.TargetSocket,
-			UpstreamSocket: cfg.UpstreamSocket,
-			Version:        Version,
+			MeowURL:            cfg.MeowURL,
+			TokenSet:           cfg.MeowToken != "",
+			Sources:            cfg.Sources,
+			SearchLimit:        cfg.SearchLimit,
+			OnlineEnabled:      cfg.OnlineEnabled,
+			SearchTimeout:      cfg.SearchTimeout,
+			StreamTimeout:      cfg.StreamTimeout,
+			LyricTimeout:       cfg.LyricTimeout,
+			TargetSocket:       cfg.TargetSocket,
+			UpstreamSocket:     cfg.UpstreamSocket,
+			YoutubeAPIURL:      cfg.YoutubeAPIURL,
+			YoutubeKeySet:      cfg.YoutubeAPIKey != "",
+			YoutubeBitrate:     cfg.YoutubeBitrate,
+			YoutubeMaxDuration: cfg.YoutubeMaxDuration,
+			Version:            Version,
 		})
 		return
 	}
@@ -133,6 +143,12 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		SearchTimeout *int      `json:"search_timeout_s"`
 		StreamTimeout *int      `json:"stream_timeout_s"`
 		LyricTimeout  *int      `json:"lyric_timeout_s"`
+
+		YoutubeAPIURL      *string `json:"youtube_api_url"`
+		YoutubeAPIKey      *string `json:"youtube_api_key"`
+		YoutubeClearKey    bool    `json:"youtube_clear_key"`
+		YoutubeBitrate     *int    `json:"youtube_bitrate"`
+		YoutubeMaxDuration *int    `json:"youtube_max_duration_s"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体不是合法 JSON：" + err.Error()})
@@ -176,6 +192,20 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	if body.LyricTimeout != nil {
 		cfg.LyricTimeout = *body.LyricTimeout
 	}
+	if body.YoutubeAPIURL != nil {
+		cfg.YoutubeAPIURL = strings.TrimSpace(*body.YoutubeAPIURL)
+	}
+	if body.YoutubeClearKey {
+		cfg.YoutubeAPIKey = ""
+	} else if body.YoutubeAPIKey != nil && strings.TrimSpace(*body.YoutubeAPIKey) != "" {
+		cfg.YoutubeAPIKey = strings.TrimSpace(*body.YoutubeAPIKey)
+	}
+	if body.YoutubeBitrate != nil {
+		cfg.YoutubeBitrate = *body.YoutubeBitrate
+	}
+	if body.YoutubeMaxDuration != nil {
+		cfg.YoutubeMaxDuration = *body.YoutubeMaxDuration
+	}
 
 	if err := s.ApplyConfig(cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -201,11 +231,18 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	_, ytSelected := splitYoutubeSource(cfg.Sources)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":  Version,
 		"uptime_s": int(time.Since(s.startedAt).Seconds()),
 		"online":   cfg.OnlineEnabled,
 		"guid_map": s.guids.Size(),
+		// 只报告"配置是否齐"，不在这里探活：状态条每 15 秒刷一次，
+		// 每次都去请求外网 mp3api 会让管理页跟着它的延迟一起卡。
+		"youtube": map[string]any{
+			"configured": s.youtubeClient() != nil,
+			"selected":   ytSelected,
+		},
 		"upstream": map[string]any{
 			"ok":     upErr == nil,
 			"socket": cfg.UpstreamSocket,
@@ -282,6 +319,41 @@ func (s *Server) adminTest(w http.ResponseWriter, r *http.Request) {
 	result["samples"] = samples
 	if len(tracks) == 0 {
 		result["warning"] = "连通正常，但这个关键词没有返回结果：检查 Meow 侧音源是否启用"
+	}
+
+	// 顺带测一次 YouTube：它和 Meow 是两条独立链路，Meow 通不代表
+	// mp3api 通（地址写错、Key 失效、ffmpeg 缺失都会让 YouTube 单独挂）。
+	// 放在这里一起返回，省得用户为了确认 YouTube 还得去 App 里搜一次。
+	if yt := s.youtubeClient(); yt != nil {
+		ytOut := map[string]any{"url": cfg.YoutubeAPIURL}
+		if err := yt.Health(ctx); err != nil {
+			ytOut["ok"] = false
+			ytOut["error"] = err.Error()
+		} else {
+			ytTracks, ytErr := yt.Search(ctx, query, 3)
+			switch {
+			case ytErr != nil:
+				ytOut["ok"] = false
+				ytOut["error"] = ytErr.Error()
+			default:
+				ytOut["ok"] = true
+				ytOut["count"] = len(ytTracks)
+				ytSamples := make([]map[string]any, 0, len(ytTracks))
+				for i, tk := range ytTracks {
+					if i >= 3 {
+						break
+					}
+					ytSamples = append(ytSamples, map[string]any{
+						"title": tk.Title, "artist": tk.Artist, "duration": tk.Duration,
+					})
+				}
+				ytOut["samples"] = ytSamples
+				if len(ytTracks) == 0 {
+					ytOut["warning"] = "mp3api 正常但这个关键词没搜到视频"
+				}
+			}
+		}
+		result["youtube"] = ytOut
 	}
 	writeJSON(w, http.StatusOK, result)
 }

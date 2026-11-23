@@ -70,8 +70,27 @@ sudo ./scripts/install.sh --uninstall
 | `lyric_timeout_s` | 8 | 歌词超时 |
 | `target_socket` | `/var/run/trim_music.socket` | 官方入口，接管目标 |
 | `upstream_socket` | `/var/run/trim_music_upstream.socket` | 官方后端被移到这里 |
+| `youtube_api_url` | 空 | YouTube 转换服务地址（mp3api）；**留空 = 不启用 YouTube** |
+| `youtube_api_key` | 空 | mp3api 的 `X-API-Key`，服务端未开鉴权时留空 |
+| `youtube_bitrate` | 192 | 转 MP3 码率，只接受 64/96/128/192/256/320 |
+| `youtube_max_duration_s` | 900 | 搜索阶段丢掉更长的视频，0 = 不过滤 |
 
-环境变量：`MEOW_EXT_URL`、`MEOW_EXT_TOKEN`、`MEOW_EXT_SOURCES`、`MEOW_EXT_ONLINE`、`MEOW_EXT_CONFIG`、`MEOW_EXT_DATA_DIR`、`MEOW_EXT_STATE_DIR`、`MEOW_EXT_GATEWAY_SOCKET`。
+环境变量：`MEOW_EXT_URL`、`MEOW_EXT_TOKEN`、`MEOW_EXT_SOURCES`、`MEOW_EXT_ONLINE`、`MEOW_EXT_CONFIG`、`MEOW_EXT_DATA_DIR`、`MEOW_EXT_STATE_DIR`、`MEOW_EXT_GATEWAY_SOCKET`、`MEOW_EXT_YOUTUBE_URL`、`MEOW_EXT_YOUTUBE_KEY`、`MEOW_EXT_YOUTUBE_BITRATE`。
+
+### YouTube（可选）
+
+Meow 只内置国内那 9 个音源，二进制里没有 YouTube 相关实现，也不能扩展。所以 YouTube 由扩展自己接一条「YouTube → MP3」的转换链路，任何实现了下面四个接口的服务都能用（例如 yt-dlp + ffmpeg 自建）：
+
+| 接口 | 用途 | 扩展怎么用 |
+| --- | --- | --- |
+| `GET /api/search?q=&limit=` | 搜视频 | 返回 `id/title/channel/duration`，转成曲目条目 |
+| `GET /api/music?video_id=&bitrate=` | 取音频 | 必须支持 Range（返回 206），否则拖不动进度条 |
+| `GET /api/lyrics?video_id=` | 歌词 | `lines[{start,end,text}]` 转 LRC |
+| `GET /api/health` | 探活 | 顺带检查 ffmpeg 是否可用 |
+
+在管理页填地址和 Key，再把音源列表里的 **YouTube** 勾上即可。它和 Meow 是两条独立链路：Meow 挂了不影响 YouTube，反之亦然；搜索时两边并发，结果按配额交替排布，不会互相挤掉。
+
+YouTube 搜歌回来常是 MV、翻唱、几十分钟合集，`youtube_max_duration_s` 用来把它们挡在搜索结果之外（默认 900 秒）——服务端下载也有同样的时长上限，超了会直接失败，所以必须在搜索阶段滤掉。
 
 ## 命令
 

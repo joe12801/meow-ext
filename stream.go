@@ -71,7 +71,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, pathGUID s
 		rangeHeader = r.Header.Get("Range")
 	}
 	start := time.Now()
-	resp, err := s.meow.Stream(ctx, r.Method, ref.playPath(), rangeHeader)
+
+	// 按来源分流：YouTube 走自建的 mp3api（/api/music），Meow 走 /stream_live。
+	// 两条链路都支持 Range，但地址和鉴权完全不同，混在一起会把视频 id
+	// 当成歌名发给 Meow，拿回一句没头没尾的"解析不到直链"。
+	var (
+		resp *http.Response
+		err  error
+	)
+	if ref.Source == youtubeSourceKey {
+		yt := s.youtubeClient()
+		if yt == nil {
+			http.Error(w, "YouTube 源未配置：请在管理页填写 mp3api 地址", http.StatusServiceUnavailable)
+			return
+		}
+		resp, err = yt.Stream(ctx, r.Method, ref.XID, rangeHeader)
+	} else {
+		resp, err = s.meow.Stream(ctx, r.Method, ref.playPath(), rangeHeader)
+	}
 	if err != nil {
 		status := meowErrStatus(err)
 		log.Printf("[stream] 取流失败 song=%q singer=%q xid=%q bv=%q: %v",
@@ -141,7 +158,19 @@ func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request, pathGUID s
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.LyricTimeout)*time.Second)
 	defer cancel()
 
-	text, err := s.meow.Lyric(ctx, ref.Song, ref.Singer)
+	text, err := "", error(nil)
+	if ref.Source == youtubeSourceKey {
+		// YouTube 的歌词来自 mp3api 的 /api/lyrics（lrclib/字幕），
+		// 与 Meow 的 /api/lyric 是两套，按来源分别取。
+		yt := s.youtubeClient()
+		if yt == nil {
+			text, err = "", nil
+		} else {
+			text, err = yt.Lyric(ctx, ref.XID)
+		}
+	} else {
+		text, err = s.meow.Lyric(ctx, ref.Song, ref.Singer)
+	}
 	if err != nil {
 		log.Printf("[lyrics] 取歌词失败 song=%q: %v", ref.Song, err)
 	}

@@ -215,6 +215,117 @@ func firstString(m map[string]any, keys ...string) string {
 	return ""
 }
 
+// splitYoutubeSource 从 sources 里摘出 youtube，剩下的原样交给 Meow。
+//
+// youtube 不是 Meow 的音源：把它混进 source= 参数，Meow 会返回空数组
+// （和传逗号列表一样是静默失败），所以必须在发请求前就摘掉。
+func splitYoutubeSource(sources []string) (meow []string, youtube bool) {
+	for _, v := range sources {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if strings.EqualFold(v, youtubeSourceKey) {
+			youtube = true
+			continue
+		}
+		meow = append(meow, v)
+	}
+	return meow, youtube
+}
+
+// interleave 交替合并两个列表，YouTube 与 Meow 各占一半开头。
+//
+// 直接 a + b 拼接会让 Youtube 永远排在官方和 Meow 之后，用户翻不到；
+// 交替排能让两边都在第一屏出现，但各自的数量仍由配额决定。
+func interleave(a, b []MeowTrack) []MeowTrack {
+	out := make([]MeowTrack, 0, len(a)+len(b))
+	for i := 0; i < len(a) || i < len(b); i++ {
+		if i < len(a) {
+			out = append(out, a[i])
+		}
+		if i < len(b) {
+			out = append(out, b[i])
+		}
+	}
+	return out
+}
+
+// searchOnline 汇总所有在线源：Meow 的多音源，加上可选的 YouTube。
+//
+// 两者并发：YouTube 走公网 + yt-dlp，比本机 Meow 慢得多，串行执行会把
+// 整个搜索拖到超时。任一侧失败都不影响另一侧——用户至少能搜到东西。
+func (s *Server) searchOnline(ctx context.Context, keyword string) ([]MeowTrack, error) {
+	cfg := s.Config()
+	meowSources, ytOn := splitYoutubeSource(cfg.Sources)
+	yt := s.youtubeClient()
+	if yt == nil {
+		ytOn = false
+	}
+	limit := cfg.SearchLimit
+	if limit <= 0 {
+		limit = 30
+	}
+
+	if !ytOn {
+		return s.meowClient().Search(ctx, keyword, limit, meowSources)
+	}
+
+	// YouTube 与 Meow 分名额：不分的话，YouTube 拿 limit 条、Meow 也拿 limit 条，
+	// 列表会翻倍且以 YouTube 的长标题为主，国内歌反而被挤到后面。
+	n := len(meowSources) + 1
+	ytQuota := limit / n
+	if ytQuota < 4 {
+		ytQuota = 4
+	}
+	if ytQuota > 12 {
+		ytQuota = 12
+	}
+	meowLimit := limit - ytQuota
+	if meowLimit < 6 {
+		meowLimit = 6
+	}
+
+	type ytResult struct {
+		tracks []MeowTrack
+		err    error
+	}
+	ytCh := make(chan ytResult, 1)
+	go func() {
+		tracks, err := yt.Search(ctx, keyword, ytQuota)
+		ytCh <- ytResult{tracks: tracks, err: err}
+	}()
+
+	var (
+		meowTracks []MeowTrack
+		meowErr    error
+	)
+	// 只勾了 youtube：跳过 Meow。否则 meowSources 为空会被理解成
+	// "不传 source = 用 Meow 的全部音源"，等于把用户没勾的源也搜了。
+	if len(cfg.Sources) > 0 && len(meowSources) == 0 {
+		// 不请求 Meow。
+	} else {
+		meowTracks, meowErr = s.meowClient().Search(ctx, keyword, meowLimit, meowSources)
+	}
+
+	res := <-ytCh
+	if res.err != nil {
+		log.Printf("[search] YouTube 搜索失败 keyword=%q: %v", keyword, res.err)
+	}
+	if meowErr != nil {
+		log.Printf("[search] Meow 搜索失败 keyword=%q: %v", keyword, meowErr)
+	}
+	out := interleave(meowTracks, res.tracks)
+	if len(out) > 0 {
+		log.Printf("[search] %q 在线合计 %d 条（Meow %d + YouTube %d）",
+			keyword, len(out), len(meowTracks), len(res.tracks))
+	}
+	if len(out) == 0 && meowErr != nil {
+		return nil, meowErr
+	}
+	return out, nil
+}
+
 // handleSearchTrack 是 /music/api/v1/search/track 的实现。
 //
 // 原则：官方结果先拿到、先保证，在线结果只是追加。任何在线侧的失败
@@ -263,16 +374,16 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 
 	// Meow 侧有自己的硬超时。搜索是同步接口，用户等不了 30 秒——
 	// 宁可不给在线结果，也不能让搜索框转圈。
-	type meowResult struct {
+	type searchResult struct {
 		tracks []MeowTrack
 		err    error
 	}
-	meowCh := make(chan meowResult, 1)
+	ch := make(chan searchResult, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.SearchTimeout)*time.Second)
 		defer cancel()
-		tracks, err := s.meow.Search(ctx, keyword, s.cfg.SearchLimit, s.cfg.Sources)
-		meowCh <- meowResult{tracks: tracks, err: err}
+		tracks, err := s.searchOnline(ctx, keyword)
+		ch <- searchResult{tracks: tracks, err: err}
 	}()
 
 	up := <-upCh
@@ -292,10 +403,10 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 	var parsed searchResponse
 	parseErr := json.Unmarshal(up.body, &parsed)
 
-	meowRes := <-meowCh
-	if meowRes.err != nil {
+	onlineRes := <-ch
+	if onlineRes.err != nil {
 		// 在线搜索失败不影响本地结果，但要留下可诊断的日志。
-		log.Printf("[search] Meow 搜索失败 keyword=%q: %v", keyword, meowRes.err)
+		log.Printf("[search] 在线搜索失败 keyword=%q: %v", keyword, onlineRes.err)
 	}
 
 	if parseErr != nil || parsed.Code != 0 {
@@ -304,7 +415,7 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 		// 也可能是接口结构变了。这时若照旧透传官方 body，在线结果会被
 		// 一并丢掉，用户看到的是"官方空 + 在线也没了"的双重空列表。
 		// 所以只要在线侧有结果，就自己组装一个 code=0 的响应顶上。
-		if !s.assembleOnlineOnly(w, up.header, meowRes.tracks, keyword, parsed.Code, up.status) {
+		if !s.assembleOnlineOnly(w, up.header, onlineRes.tracks, keyword, parsed.Code, up.status) {
 			writeHeaderFrom(w, up.header)
 			w.WriteHeader(up.status)
 			w.Write(up.body)
@@ -315,7 +426,7 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 	// 先在合并前记下官方条数：合并会就地改写 parsed.Data["list"]，
 	// 事后再数就只剩合计，日志会误导排障。
 	officialCount := len(officialList(parsed.Data))
-	merged, added := s.mergeOnline(parsed, meowRes.tracks)
+	merged, added := s.mergeOnline(parsed, onlineRes.tracks)
 	if added == 0 {
 		writeHeaderFrom(w, up.header)
 		w.WriteHeader(up.status)
