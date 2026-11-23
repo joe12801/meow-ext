@@ -1,0 +1,21 @@
+#!/bin/bash
+# 升级前：先停服务让入口还原。
+#
+# 不能直接覆盖二进制再重启：旧进程还占着入口，新进程起来时会把入口
+# 判定成"别人的监听"而拒绝接管，用户看到的是升级后扩展不工作。
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+was_active=0
+if systemctl is-active --quiet meow-ext.service; then
+    was_active=1
+fi
+systemctl stop meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+if [ -n "${MEOW_BIN}" ]; then
+    "${MEOW_BIN}" restore --config "${MEOW_CONFIG}" >> "${MEOW_LOG}" 2>&1 || true
+fi
+printf '%s' "${was_active}" > "${MEOW_STATE_WAS_ACTIVE:-${MEOW_PKGVAR}/.was_active}"
+
+exit 0

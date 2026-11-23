@@ -1,0 +1,29 @@
+[
+    {
+        "stepTitle": "Meow 音源扩展",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "本扩展需要应用中心已安装并启动官方「飞牛音乐」（安装时自动检测）。扩展只接管官方音乐入口做转发，不修改官方程序，也不写官方数据库；在应用中心停止本应用即可完全还原。"
+            },
+            {
+                "type": "tips",
+                "helpText": "本扩展本身不含音乐源，需要一台已在运行的 MeowMusicServer。可以装在同一台 NAS 上（如 http://127.0.0.1:2233），也可以指向局域网里的另一台机器。地址留空也可以先装好，之后再从桌面「Meow 音源扩展」里填写。"
+            },
+            {
+                "type": "input",
+                "field": "wizard_meow_url",
+                "label": "MeowMusicServer 地址（可留空）",
+                "initValue": "",
+                "placeholder": "http://192.168.2.220:2233",
+                "rules": []
+            },
+            {
+                "type": "switch",
+                "field": "wizard_enable",
+                "label": "安装完成后立即启用（接管官方音乐入口，可随时停止还原）",
+                "initValue": "true"
+            }
+        ]
+    }
+]

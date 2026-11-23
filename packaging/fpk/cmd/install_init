@@ -1,0 +1,16 @@
+#!/bin/bash
+# 安装前置检查：只在应用文件落地前跑，所以能做的检查有限，
+# 但这两条是硬前提，不满足时让用户在向导阶段就知道，比装完报错好。
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+[ -S /var/run/trim_music.socket ] || [ -S /var/run/trim_music_upstream.socket ] \
+    || meow_fail "未检测到官方「飞牛音乐」：请先在应用中心安装并启动飞牛音乐"
+
+if [ ! -d /run/systemd/system ]; then
+    meow_fail "本应用依赖 systemd 管理后台服务，当前系统不支持"
+fi
+
+exit 0

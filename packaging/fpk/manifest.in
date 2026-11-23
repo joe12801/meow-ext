@@ -1,0 +1,14 @@
+appname               = meow-ext
+version               = @VERSION@
+display_name          = Meow 音源扩展
+desc                  = 把 MeowMusicServer 的多源音乐接入飞牛音乐：官方曲库与在线搜索并存，支持搜索、播放、拖动进度、歌词与封面。单二进制，无需 Docker / Python / Node。
+platform              = @PLATFORM@
+source                = thirdparty
+maintainer            = joe12801
+maintainer_url        = https://github.com/joe12801/meow-fnos-ext
+os_min_version        = 1.2.0
+install_dep_apps      = trim.music
+desktop_uidir         = ui
+desktop_applaunchname = meow-ext.main
+checkport             = false
+micro_app             = true

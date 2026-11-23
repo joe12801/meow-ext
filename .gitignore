@@ -1,0 +1,15 @@
+# 构建产物
+/dist/
+*.fpk
+*.tgz
+*.tar.gz
+
+# 临时文件
+*.log
+*.tmp
+preview_icon.png
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/

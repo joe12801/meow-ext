@@ -1,0 +1,39 @@
+#!/bin/bash
+# 应用中心的 启动 / 停止 / 状态。
+#   start  = 启动服务（接管官方音乐入口）
+#   stop   = 停止服务（ExecStopPost 会把入口还给官方）
+#   status = 0 运行中 / 3 已停止
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+case "${1:-}" in
+    start)
+        [ -n "${MEOW_BIN}" ] || meow_fail "应用文件缺失，请卸载后重新安装"
+        # 上次可能是被杀掉的，入口残留要靠 restore 清理后再起。
+        systemctl start meow-ext.service >> "${MEOW_LOG}" 2>&1
+        if ! systemctl is-active --quiet meow-ext.service; then
+            tail -n 5 "${MEOW_LOG}" >&2 || true
+            meow_fail "启动失败：详见 ${MEOW_LOG}"
+        fi
+        exit 0
+        ;;
+    stop)
+        systemctl stop meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+        if [ -n "${MEOW_BIN}" ]; then
+            # 双保险：unit 的 ExecStopPost 已做过一次，这里再确认入口确实还给了官方。
+            "${MEOW_BIN}" restore --config "${MEOW_CONFIG}" >> "${MEOW_LOG}" 2>&1 || true
+        fi
+        exit 0
+        ;;
+    status)
+        if systemctl is-active --quiet meow-ext.service; then
+            exit 0
+        fi
+        exit 3
+        ;;
+    *)
+        exit 1
+        ;;
+esac

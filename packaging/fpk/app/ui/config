@@ -1,0 +1,16 @@
+{
+    ".url": {
+        "meow-ext.main": {
+            "title": "Meow 音源扩展",
+            "desc": "上游地址 / 音源开关 / 连接测试",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "",
+            "url": "/app/meow-ext/",
+            "allUsers": false,
+            "gatewaySocket": "meow-ext.sock",
+            "gatewayPrefix": "/app/meow-ext"
+        }
+    }
+}

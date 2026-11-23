@@ -1,0 +1,26 @@
+#!/bin/bash
+# 升级后：重新渲染 unit（路径可能变了）并按升级前的状态恢复运行。
+# 用户配置一律保留，不覆盖。
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+[ -n "${MEOW_BIN}" ] || meow_fail "升级后找不到可执行文件，请卸载后重新安装"
+chmod +x "${MEOW_BIN}" 2>/dev/null || true
+
+render_unit || meow_fail "写入 systemd unit 失败"
+
+was_active="$(cat "${MEOW_PKGVAR}/.was_active" 2>/dev/null || echo 0)"
+if [ "${was_active}" = "1" ]; then
+    if ! systemctl start meow-ext.service >> "${MEOW_LOG}" 2>&1; then
+        "${MEOW_BIN}" restore --config "${MEOW_CONFIG}" >> "${MEOW_LOG}" 2>&1 || true
+        tail -n 5 "${MEOW_LOG}" >&2 || true
+        meow_fail "升级后启动失败：详见 ${MEOW_LOG}"
+    fi
+    meow_note "升级完成，服务已恢复运行"
+else
+    meow_note "升级完成（服务此前处于停止状态，保持停止）"
+fi
+
+exit 0

@@ -1,0 +1,22 @@
+#!/bin/bash
+# 卸载前：把官方入口还给飞牛音乐，并停掉服务。
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+systemctl stop meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+
+if [ -n "${MEOW_BIN}" ]; then
+    # 关键一步：不还原就卸载，官方音乐的 nginx 会指向一个已删除的 socket，
+    # 表现是"卸了扩展之后飞牛音乐彻底打不开"，只能重启官方应用才好。
+    "${MEOW_BIN}" restore --config "${MEOW_CONFIG}" >> "${MEOW_LOG}" 2>&1 || true
+fi
+
+systemctl disable meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+rm -f "${MEOW_UNIT}"
+systemctl daemon-reload >> "${MEOW_LOG}" 2>&1 || true
+rm -f "${MEOW_GATEWAY_SOCK}" 2>/dev/null || true
+rm -rf "${MEOW_STATE}" 2>/dev/null || true
+
+exit 0

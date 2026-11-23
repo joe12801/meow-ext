@@ -1,0 +1,61 @@
+#!/bin/bash
+# 安装主体：渲染配置与 unit，自检，按向导选择决定是否立即启用。
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${SELF_DIR}/_common"
+
+[ -n "${MEOW_BIN}" ] || meow_fail "应用文件缺失（找不到 meow-ext 可执行文件），请卸载后重新安装"
+chmod +x "${MEOW_BIN}" 2>/dev/null || true
+
+# 1. 首次安装时写一份配置。已有配置绝不覆盖——升级不能把用户填的地址抹掉。
+if [ ! -f "${MEOW_CONFIG}" ]; then
+    url="${wizard_meow_url:-}"
+    case "${url}" in
+        "") url="http://127.0.0.1:2233" ;;
+    esac
+    # 用户填的地址少了 scheme 时补 http://：这是最常见的输入失误，
+    # 与其在启动后报"unsupported protocol"，不如现在就顺过来。
+    case "${url}" in
+        http://*|https://*) ;;
+        *) url="http://${url}" ;;
+    esac
+    printf '{\n  "meow_url": "%s"\n}\n' "${url}" > "${MEOW_CONFIG}"
+    chmod 0600 "${MEOW_CONFIG}"
+    meow_note "已写入初始配置 ${MEOW_CONFIG}（上游 ${url}）"
+fi
+
+# 2. 渲染并安装 systemd unit。
+render_unit || meow_fail "写入 systemd unit 失败"
+meow_note "已安装 ${MEOW_UNIT}"
+
+# 3. 自检。Meow 不可达只提示不阻断——先装好、再去配地址是常见流程。
+check_out="$("${MEOW_BIN}" check --config "${MEOW_CONFIG}" 2>&1)"
+printf '%s\n' "${check_out}" >> "${MEOW_LOG}"
+if printf '%s' "${check_out}" | grep -q "自检未通过"; then
+    meow_note "自检未通过："
+    printf '%s\n' "${check_out}" >&2
+    meow_fail "安装自检未通过，详见 ${MEOW_LOG}"
+fi
+
+# 4. 启用。默认启用；用户选否则只装不接管。
+enable="${wizard_enable:-true}"
+case "${enable}" in
+    true|True|TRUE|1|yes|on) enable=1 ;;
+    *) enable=0 ;;
+esac
+
+if [ "${enable}" = "1" ]; then
+    if ! systemctl enable --now meow-ext.service >> "${MEOW_LOG}" 2>&1; then
+        # 启动失败必须回滚接管，否则入口会停在一个没人服务的路径上。
+        "${MEOW_BIN}" restore --config "${MEOW_CONFIG}" >> "${MEOW_LOG}" 2>&1 || true
+        tail -n 5 "${MEOW_LOG}" >&2 || true
+        meow_fail "启动失败：详见 ${MEOW_LOG}"
+    fi
+    meow_note "已启用服务"
+else
+    systemctl enable meow-ext.service >> "${MEOW_LOG}" 2>&1 || true
+    meow_note "已安装但未启用（可在应用中心启动）"
+fi
+
+exit 0

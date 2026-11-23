@@ -1,0 +1,32 @@
+# 由 cmd/_common 的 render_unit 渲染：@APPDEST@ / @PKGVAR@ / @STATE@ / @GATEWAY_SOCK@
+[Unit]
+Description=Meow 音源扩展（飞牛音乐入口接管）
+Documentation=https://github.com/joe12801/meow-fnos-ext
+After=network.target
+# 不强绑官方音乐的 unit 名：不同 fnOS 版本命名不一致，绑错了会导致
+# 本服务在官方之前启动、自检失败后又被 systemd 反复重启。
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=@APPDEST@
+ExecStart=@APPDEST@/app/bin/meow-ext run --config @PKGVAR@/config.json
+# ExecStopPost 是最后一道保险：进程被正常停止时 run 自己会还原入口，
+# 但被 SIGKILL / OOM 杀掉时不会，这里补一次（restore 是幂等的）。
+ExecStopPost=@APPDEST@/app/bin/meow-ext restore --config @PKGVAR@/config.json
+Environment=MEOW_EXT_CONFIG=@PKGVAR@/config.json
+Environment=MEOW_EXT_DATA_DIR=@PKGVAR@/data
+Environment=MEOW_EXT_STATE_DIR=@STATE@
+Environment=MEOW_EXT_GATEWAY_SOCKET=@GATEWAY_SOCK@
+# 接管+官方就绪探测最多 40 秒，留出余量。
+TimeoutStartSec=60
+# 退出时要等正在播放的请求收尾，别把用户正在听的歌直接掐断。
+TimeoutStopSec=30
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

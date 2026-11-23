@@ -1,0 +1,29 @@
+# 统一 LF：FPK 里的 cmd/*、wizard/*、config/* 会被飞牛上的 shell 直接 source，
+# 带上 \r 会变成 "bad interpreter" 或路径尾部多一个不可见字符。
+# 显式 eol=lf 可以压住 Windows 上 core.autocrlf=true 的默认行为。
+* text=auto eol=lf
+
+# Go 源码
+*.go    text eol=lf
+go.mod  text eol=lf
+
+# shell 脚本必须 LF：FPK 里的 cmd/* 与 systemd 会被飞牛直接执行，
+# CRLF 会导致 "bad interpreter: no such file or directory"
+*.sh        text eol=lf
+packaging/fpk/cmd/*  text eol=lf
+packaging/fpk/wizard/*  text eol=lf
+
+# systemd unit 模板
+*.service.in  text eol=lf
+*.in          text eol=lf
+
+# 配置与文档
+*.json  text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+VERSION text eol=lf
+
+# 二进制资源
+*.png   binary
+*.PNG   binary
+*.fpk   binary

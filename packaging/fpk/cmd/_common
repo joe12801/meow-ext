@@ -1,0 +1,68 @@
+#!/bin/bash
+# meow-ext 应用中心生命周期脚本的公共部分（被 source，不单独执行）。
+# 调用方必须先设置 SELF_DIR 为自己的目录。
+
+MEOW_APP_ROOT="$(cd "${SELF_DIR}/.." && pwd)"
+
+# 二进制位置：不同 fnOS 版本把应用文件落在不同层级，依次探测。
+MEOW_BIN=""
+for _cand in \
+    "${TRIM_APPDEST:-}/app/bin/meow-ext" \
+    "${MEOW_APP_ROOT}/app/bin/meow-ext" \
+    "${MEOW_APP_ROOT}/target/app/bin/meow-ext"
+do
+    if [ -n "${_cand}" ] && [ -x "${_cand}" ]; then
+        MEOW_BIN="${_cand}"
+        break
+    fi
+done
+unset _cand
+
+# 持久数据目录：配置与 id 映射放这里，应用升级/重启都不丢。
+MEOW_PKGVAR="${TRIM_PKGVAR:-${MEOW_APP_ROOT}/data}"
+MEOW_CONFIG="${MEOW_PKGVAR}/config.json"
+MEOW_DATA="${MEOW_PKGVAR}/data"
+MEOW_STATE="/run/meow-ext"
+MEOW_GATEWAY_SOCK="${TRIM_APPDEST:-${MEOW_APP_ROOT}}/meow-ext.sock"
+MEOW_UNIT="/etc/systemd/system/meow-ext.service"
+MEOW_LOG="${MEOW_PKGVAR}/app.log"
+
+mkdir -p "${MEOW_PKGVAR}" 2>/dev/null || true
+mkdir -p "${MEOW_DATA}" 2>/dev/null || true
+
+meow_fail() {
+    # 应用中心的进度弹窗只显示 TRIM_TEMP_LOGFILE 的内容，短句才有用。
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        echo "$1" > "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+    fi
+    echo "[meow-ext] $1" >&2
+    exit 1
+}
+
+meow_note() {
+    echo "[meow-ext] $1" | tee -a "${MEOW_LOG}" 2>/dev/null || true
+}
+
+# render_unit 把模板里的占位符换成实际路径并落盘。
+# 路径里若含反斜杠、引号、% 等字符，systemd 会把整行解释错，直接拒绝而不是硬写。
+render_unit() {
+    local tpl="${MEOW_APP_ROOT}/app/systemd/meow-ext.service.in"
+    [ -f "${tpl}" ] || tpl="${MEOW_APP_ROOT}/systemd/meow-ext.service.in"
+    [ -f "${tpl}" ] || meow_fail "缺少 systemd 模板（meow-ext.service.in），请重新安装"
+
+    local root="${TRIM_APPDEST:-${MEOW_APP_ROOT}}"
+    if printf '%s' "${root}" | grep -q '[[:cntrl:]"\\%$]'; then
+        meow_fail "应用安装路径含 systemd 不支持的字符：${root}"
+    fi
+
+    local tmp="${MEOW_UNIT}.tmp"
+    sed -e "s#@APPDEST@#${root}#g" \
+        -e "s#@PKGVAR@#${MEOW_PKGVAR}#g" \
+        -e "s#@STATE@#${MEOW_STATE}#g" \
+        -e "s#@GATEWAY_SOCK@#${MEOW_GATEWAY_SOCK}#g" \
+        "${tpl}" > "${tmp}" || return 1
+    mv "${tmp}" "${MEOW_UNIT}"
+    chmod 0644 "${MEOW_UNIT}"
+    systemctl daemon-reload >> "${MEOW_LOG}" 2>&1 || true
+    return 0
+}
