@@ -12,4 +12,3 @@ desktop_uidir         = ui
 desktop_applaunchname = meow-ext.main
 checkport             = false
 micro_app             = true
-checksum              = @CHECKSUM@

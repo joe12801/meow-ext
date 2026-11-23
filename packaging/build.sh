@@ -51,6 +51,36 @@ platform_of() {
     esac
 }
 
+# 必须用官方 fnpack 打包，不要手写 tar。
+# fnpack 是飞牛官方的打包/校验工具，应用中心用它同一套规则验包：
+# manifest 的 checksum、包内条目名、wizard/*.json 的 schema 全由它把关。
+# 手写 tar 能凑出结构，但 wizard/install 里一个非法字段（例如
+# "type": "input"，合法值是 "text"）会让应用中心在解包阶段直接拒绝，
+# 报的却是「应用包不符合应用/系统要求」，完全看不出是哪个文件的问题；
+# 而 fnpack 会在打包期就精确报出 "File \"install\" is not valid ..."。
+ensure_fnpack() {
+    if command -v fnpack >/dev/null 2>&1; then
+        command -v fnpack
+        return
+    fi
+    local cache="${ROOT}/.tools" ver="${FNPACK_VERSION:-1.2.4}" arch bin
+    case "$(uname -m)" in
+        x86_64|amd64)  arch=amd64 ;;
+        aarch64|arm64) arch=arm ;;
+        *) die "不支持的构建机架构：$(uname -m)" ;;
+    esac
+    mkdir -p "${cache}"
+    bin="${cache}/fnpack"
+    if [ ! -x "${bin}" ]; then
+        printf '\033[1;34m[build]\033[0m 本机没有 fnpack，下载 %s（linux-%s）\n' "${ver}" "${arch}" >&2
+        curl -fsSL -o "${bin}" \
+            "https://static2.fnnas.com/fnpack/fnpack-${ver}-linux-${arch}" \
+            || die "下载 fnpack 失败，请手动安装 fnpack 后重试"
+        chmod +x "${bin}"
+    fi
+    echo "${bin}"
+}
+
 mkdir -p "${OUT}/bin"
 rm -rf "${OUT:?}/stage-"*
 
@@ -81,27 +111,13 @@ for arch in ${PLATFORMS}; do
         log "警告：缺少 app/ui/images 图标，桌面图标会显示为空白"
     fi
 
-    # ---- 2. 打成 app.tgz ----
-    # 这是飞牛 FPK 的硬性约定：应用主体必须是包内顶层的一个 app.tgz，
-    # 缺了它应用中心会直接报 ErrCodePackageException（"应用包不符合系统要求"）。
-    # 归档内顶层必须是 bin/ ui/ systemd/，解压后直接落在 target/ 下。
-    #
-    # 不能写 `tar czf x.tgz -C dir .`：句点会让每条记录都带 "./" 前缀，
-    # 而应用中心按精确名字取包内文件，带前缀就一个都匹配不上，
-    # 报的是"应用包不符合系统要求"，完全看不出原因。
-    # 也不能用 `find | tar -T -`：tar 遇到目录条目会再递归一次，
-    # 与 find 已列出的文件重复，第二份被存成指向自己的硬链接。
-    # 显式列出顶层成员最稳，目录内容由 tar 自己递归。
-    tar czf "${stage}/app.tgz" --owner=0 --group=0 --numeric-owner \
-        -C "${stage}/app" bin ui systemd
-    rm -rf "${stage}/app"
+    # ---- 2. app.tgz 交给 fnpack 生成 ----
+    # app/ 保持目录形态（bin、ui、systemd），fnpack 会自动打成包内顶层
+    # 唯一的 app.tgz，并按它的 md5 写好 manifest 的 checksum。
 
-    # ---- 3. manifest（checksum 必须是 app.tgz 的 md5，构建期算完注入）----
-    # 校验和是安装前的第一道关：对不上就说明包坏了或被人改过，应用中心会拒装。
-    checksum="$(md5sum "${stage}/app.tgz" | cut -d' ' -f1)"
+    # ---- 3. manifest（checksum 由 fnpack 打包时写入，这里不要自己算）----
     sed -e "s/@VERSION@/${VERSION}/g" \
         -e "s/@PLATFORM@/$(platform_of "${arch}")/g" \
-        -e "s/@CHECKSUM@/${checksum}/g" \
         packaging/fpk/manifest.in > "${stage}/manifest"
     cp packaging/fpk/ICON.PNG packaging/fpk/ICON_256.PNG "${stage}/"
     cp -a packaging/fpk/config/. "${stage}/config/"
@@ -111,34 +127,42 @@ for arch in ${PLATFORMS}; do
     chmod 0755 "${stage}/cmd/"* 2>/dev/null || true
 
     # ---- 4. 打包前自检：这几项缺任何一项都会被应用中心拒装 ----
-    for _need in manifest app.tgz ICON.PNG ICON_256.PNG cmd/main config/privilege; do
+    for _need in manifest ICON.PNG ICON_256.PNG cmd/main config/privilege app/bin/meow-ext; do
         [ -e "${stage}/${_need}" ] || die "FPK 结构不完整，缺少 ${_need}"
     done
-    _sz=$(wc -c < "${stage}/app.tgz")
-    # app.tgz 过小说明打包中断（真实应用至少几百 KB）。
-    [ "${_sz}" -gt 10240 ] || die "app.tgz 只有 ${_sz} 字节，明显不完整"
+
+    # ---- 5. 用官方 fnpack 打包 ----
+    # 所有格式细节（app.tgz、checksum、条目名、wizard schema）都由它保证，
+    # 手写 tar 做不到同等校验收敛。
     pkg="${OUT}/meow-ext-${VERSION}-${arch}.fpk"
     rm -f "${pkg}"
-    # FPK 就是 tar.gz，只是扩展名不同。
-    # 同样显式列顶层成员：应用中心记录的是
-    # dirs="[cmd config wizard]" files="[ICON.PNG ICON_256.PNG app.tgz manifest]"，
-    # 靠精确名枚举，条目名不能带 "./" 前缀。
-    tar czf "${pkg}" --owner=0 --group=0 --numeric-owner -C "${stage}" \
-        manifest app.tgz ICON.PNG ICON_256.PNG cmd config wizard
+    _work="$(mktemp -d)"
+    if ! ( cd "${_work}" && "$(ensure_fnpack)" build -d "${stage}" ); then
+        rm -rf "${_work}"
+        die "fnpack 打包失败（真实原因见上一行提示）"
+    fi
+    _built="$(find "${_work}" -maxdepth 1 -name '*.fpk' -print -quit)"
+    if [ -z "${_built}" ]; then
+        rm -rf "${_work}"
+        die "fnpack 没有产出 .fpk"
+    fi
+    mv "${_built}" "${pkg}"
+    rm -rf "${_work}" "${stage}"
 
-    # 自检：任何条目带 "./" 前缀都会被应用中心判为"应用包不符合系统要求"。
-    # 这个坑只在真机安装时暴露，且报错完全看不出原因，必须在打包期拦住。
-    if tar tzf "${pkg}" 2>/dev/null | grep -q '^\./'; then
-        die "FPK 条目带了 ./ 前缀，应用中心会拒装：$(tar tzf "${pkg}" | head -2 | tr '\n' ' ')"
-    fi
-    if tar tzf "${stage}/app.tgz" 2>/dev/null | grep -q '^\./'; then
-        die "app.tgz 条目带了 ./ 前缀"
-    fi
-    # 重复条目会被存成指向自己的硬链接，包能打出来但内容不完整。
-    _dup=$(tar tzf "${pkg}" 2>/dev/null | sort | uniq -d)
+    # ---- 6. 产物自检：顶层条目不带 ./ 前缀、不重复、app.tgz 在顶层 ----
+    # 注意这里刻意不用 `tar tzf | grep -q`：grep -q 命中即退出会让 tar 收到
+    # SIGPIPE，而 pipefail 会把它当成失败，反而误报。
+    _list="$(tar tzf "${pkg}" 2>/dev/null || true)"
+    case $'\n'"${_list}"$'\n' in
+        *$'\n\./'*) die "FPK 条目带了 ./ 前缀，应用中心会拒装" ;;
+    esac
+    case $'\n'"${_list}"$'\n' in
+        *$'\n'app.tgz$'\n'*) ;;
+        *) die "FPK 顶层缺少 app.tgz" ;;
+    esac
+    _dup=$(printf '%s\n' "${_list}" | sort | uniq -d)
     [ -z "${_dup}" ] || die "FPK 里有重复条目：${_dup}"
     log "产出 $(du -h "${pkg}" | cut -f1) ${pkg}"
-    rm -rf "${stage}"
 done
 
 log "全部完成，产物在 ${OUT}"
