@@ -35,7 +35,7 @@
 ### 1. 应用中心（推荐）
 
 1. 应用中心里已安装并**启动**官方「飞牛音乐」。
-2. 从 Releases 下载 `meow-ext-<版本>-arm64.fpk`（或 `-amd64`），应用中心 → 手动安装。
+2. 从 [Releases](https://github.com/joe12801/meow-ext/releases/latest) 下载 `meow-ext-<版本>-arm64.fpk`（或 `-amd64`），应用中心 → 手动安装。
 3. 向导里填 Meow 地址（可以留空，装完再填）。
 4. 从飞牛桌面打开「Meow 音源扩展」，测试连接、选音源、保存。
 
@@ -141,7 +141,7 @@ X-Guest-Quota: exhausted
 ```bash
 go test ./...                    # 单元与集成测试（假官方 socket + 假 Meow）
 python tools/make_icons.py       # 重新生成图标
-VERSION=0.1.0 ./packaging/build.sh
+./packaging/build.sh             # 用 VERSION 文件里的版本号交叉编译并出 FPK
 ```
 
 代码结构：
