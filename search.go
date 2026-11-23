@@ -292,18 +292,26 @@ func (s *Server) handleSearchTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var parsed searchResponse
-	if err := json.Unmarshal(up.body, &parsed); err != nil || parsed.Code != 0 {
-		// 官方响应不是预期结构：不动它。
-		writeHeaderFrom(w, up.header)
-		w.WriteHeader(up.status)
-		w.Write(up.body)
-		return
-	}
+	parseErr := json.Unmarshal(up.body, &parsed)
 
 	meowRes := <-meowCh
 	if meowRes.err != nil {
 		// 在线搜索失败不影响本地结果，但要留下可诊断的日志。
 		log.Printf("[search] Meow 搜索失败 keyword=%q: %v", keyword, meowRes.err)
+	}
+
+	if parseErr != nil || parsed.Code != 0 {
+		// 官方这次没给出可用结果：可能是 token 失效（实测有的机器上
+		// /search/track 会返回 {"code":99999,"msg":"INVALID TOKEN","data":null}），
+		// 也可能是接口结构变了。这时若照旧透传官方 body，在线结果会被
+		// 一并丢掉，用户看到的是"官方空 + 在线也没了"的双重空列表。
+		// 所以只要在线侧有结果，就自己组装一个 code=0 的响应顶上。
+		if !s.assembleOnlineOnly(w, up.header, meowRes.tracks, keyword, parsed.Code, up.status) {
+			writeHeaderFrom(w, up.header)
+			w.WriteHeader(up.status)
+			w.Write(up.body)
+		}
+		return
 	}
 
 	// 先在合并前记下官方条数：合并会就地改写 parsed.Data["list"]，
@@ -389,6 +397,57 @@ func (s *Server) mergeOnline(parsed searchResponse, tracks []MeowTrack) (searchR
 		parsed.Data["total"] = total + added
 	}
 	return parsed, added
+}
+
+// assembleOnlineOnly 在官方搜索不可用时，用在线结果单独组一个正常响应。
+//
+// 返回 false 表示没有可下发的在线结果，调用方应原样透传官方响应。
+// 退化的做法（透传官方 body）在这里是错的：用户搜不到东西时，
+// 在线源是他唯一能用的出口，不能因为官方 token 掉了就一起沉默。
+func (s *Server) assembleOnlineOnly(w http.ResponseWriter, header http.Header,
+	tracks []MeowTrack, keyword string, officialCode int, officialStatus int) bool {
+	list := make([]any, 0, len(tracks))
+	seen := make(map[string]struct{}, len(tracks))
+	for _, t := range tracks {
+		if strings.TrimSpace(t.Title) == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(t.Title)) + "\x00" + strings.ToLower(strings.TrimSpace(t.Artist))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		ref := trackToRef(t)
+		realID := EncodeGUID(ref)
+		fakeID := s.guids.Fake(realID)
+		list = append(list, buildTrackVO(realID, fakeID, t))
+	}
+	if len(list) == 0 {
+		return false
+	}
+
+	// 分页字段给足几种叫法：前端取 total 还是 totalCount 无从确认（两套前端
+	// 各自实现），少一个就可能导致"共 0 首"或滚不到底。
+	data := map[string]any{
+		"list":       list,
+		"total":      len(list),
+		"totalCount": len(list),
+		"page":       1,
+		"pageSize":   len(list),
+		"hasMore":    false,
+	}
+	out, err := json.Marshal(searchResponse{Code: 0, Data: data})
+	if err != nil {
+		return false
+	}
+	log.Printf("[search] keyword=%q 官方不可用（code=%d status=%d），仅下发在线 %d 条",
+		keyword, officialCode, officialStatus, len(list))
+	writeHeaderFrom(w, header)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Del("Content-Length")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+	return true
 }
 
 // writeHeaderFrom 复制上游响应头，剔除会让 Go 的 ResponseWriter 行为错乱的几个。

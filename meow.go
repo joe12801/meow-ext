@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,19 +90,101 @@ func (c *MeowClient) newRequest(ctx context.Context, method, path string, query 
 
 // Search 调 Meow 的聚合搜索。
 //
-// sources 为空时不传 source 参数，等于让 Meow 用自己配置的全部启用音源；
-// 这比在扩展里维护一份音源清单更耐用——上游增减音源不用跟着改扩展。
+// 关键坑：Meow 的 /api/search 只认**单个** source。把多选音源拼成
+// "source=kuwo,netease" 发过去不会报错，而是静默返回空数组
+// （HTTP 200 + []），在扩展这边看起来"搜索成功但没结果"，极难定位。
+// 所以多选时这里逐源并发请求再合并去重，而不是把列表塞进一个参数。
+//
+// sources 为空表示"由 Meow 自己决定"，此时不传 source 参数，等于用它
+// 配置里的全部启用音源——这样上游增减音源不用跟着改扩展。
 func (c *MeowClient) Search(ctx context.Context, query string, limit int, sources []string) ([]MeowTrack, error) {
-	if strings.TrimSpace(query) == "" {
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return nil, nil
 	}
+	if len(sources) <= 1 {
+		src := ""
+		if len(sources) == 1 {
+			src = sources[0]
+		}
+		return c.searchOnce(ctx, query, limit, src)
+	}
+
+	// 每个音源取多少条：总上限摊到各源，至少 3 条，避免 8 个源各拉 20 条。
+	perSource := limit
+	if perSource <= 0 {
+		perSource = 10
+	}
+	if n := len(sources); perSource > n*3 {
+		perSource = n * 3
+	}
+	if perSource < 3 {
+		perSource = 3
+	}
+
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		firstErr error
+		okN    int
+		parts  = make([][]MeowTrack, len(sources))
+		sem    = make(chan struct{}, 4) // 上游是本机服务，4 并发够了
+	)
+	for i, src := range sources {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, src string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			got, err := c.searchOnce(ctx, query, perSource, src)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			okN++
+			parts[i] = got
+		}(i, src)
+	}
+	wg.Wait()
+
+	// 全部失败才算失败；只要有源可用就返回结果，不让单个坏源拖垮整次搜索。
+	if okN == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+
+	seen := make(map[string]struct{}, 64)
+	out := make([]MeowTrack, 0, 64)
+	for _, got := range parts { // 按 sources 顺序摊平，结果稳定
+		for _, t := range got {
+			key := t.Source + "\x1f" + t.Title + "\x1f" + t.Artist
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	log.Printf("[search] %q 多源合并：%d/%d 个音源有结果，合计 %d 条",
+		query, okN, len(sources), len(out))
+	return out, nil
+}
+
+// searchOnce 按单个音源（source 为空表示不限定）搜一次。
+func (c *MeowClient) searchOnce(ctx context.Context, query string, limit int, source string) ([]MeowTrack, error) {
 	q := url.Values{}
 	q.Set("query", query)
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	if len(sources) > 0 {
-		q.Set("source", strings.Join(sources, ","))
+	if source != "" {
+		q.Set("source", source)
 	}
 	req, err := c.newRequest(ctx, http.MethodGet, "/api/search", q)
 	if err != nil {
